@@ -1,3 +1,4 @@
+use crate::arrow::{ArrowCollected, try_from_arrow_c_array, try_from_arrow_c_stream};
 use crate::dtype::{DTypeKind, decode_value, parse_buffer_dtype};
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::ffi;
@@ -31,8 +32,13 @@ impl Drop for BorrowedBuffer {
     }
 }
 
+enum Storage {
+    Borrowed(BorrowedBuffer),
+    Owned(Vec<u8>),
+}
+
 pub(crate) struct BufferInput {
-    raw: BorrowedBuffer,
+    storage: Storage,
     pub(crate) dtype: DTypeKind,
     len: usize,
     itemsize: usize,
@@ -40,6 +46,30 @@ pub(crate) struct BufferInput {
 
 impl BufferInput {
     pub(crate) fn from_any(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let mut reasons = Vec::with_capacity(3);
+
+        match Self::from_buffer_only(obj) {
+            Ok(input) => return Ok(input),
+            Err(err) => reasons.push(format!("buffer protocol: {err}")),
+        }
+
+        match try_from_arrow_c_array(obj) {
+            Ok(collected) => return Self::from_arrow_collected(collected),
+            Err(err) => reasons.push(format!("__arrow_c_array__: {err}")),
+        }
+
+        match try_from_arrow_c_stream(obj) {
+            Ok(collected) => return Self::from_arrow_collected(collected),
+            Err(err) => reasons.push(format!("__arrow_c_stream__: {err}")),
+        }
+
+        Err(PyBufferError::new_err(format!(
+            "failed to parse input via supported protocols:\n{}",
+            reasons.join("\n")
+        )))
+    }
+
+    fn from_buffer_only(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         let raw = BorrowedBuffer::new(obj)?;
         let view = &raw.view;
 
@@ -87,10 +117,41 @@ impl BufferInput {
         }
 
         Ok(Self {
-            raw,
+            storage: Storage::Borrowed(raw),
             dtype,
             len,
             itemsize,
+        })
+    }
+
+    fn from_arrow_collected(collected: ArrowCollected) -> PyResult<Self> {
+        if collected.itemsize == 0 {
+            return Err(PyBufferError::new_err(
+                "Arrow itemsize must be a positive integer",
+            ));
+        }
+
+        if collected.itemsize != collected.dtype.itemsize() {
+            return Err(PyBufferError::new_err(
+                "Arrow itemsize does not match parsed dtype",
+            ));
+        }
+
+        let expected_bytes = collected
+            .len
+            .checked_mul(collected.itemsize)
+            .ok_or_else(|| PyBufferError::new_err("Arrow byte size overflow"))?;
+        if expected_bytes != collected.bytes.len() {
+            return Err(PyBufferError::new_err(
+                "Arrow byte length does not match dtype itemsize",
+            ));
+        }
+
+        Ok(Self {
+            storage: Storage::Owned(collected.bytes),
+            dtype: collected.dtype,
+            len: collected.len,
+            itemsize: collected.itemsize,
         })
     }
 
@@ -102,8 +163,13 @@ impl BufferInput {
         debug_assert!(index < self.len);
 
         let offset = index * self.itemsize;
-        let ptr = unsafe { (self.raw.view.buf as *const u8).add(offset) };
-        let bytes = unsafe { std::slice::from_raw_parts(ptr, self.itemsize) };
+        let bytes = match &self.storage {
+            Storage::Borrowed(raw) => {
+                let ptr = unsafe { (raw.view.buf as *const u8).add(offset) };
+                unsafe { std::slice::from_raw_parts(ptr, self.itemsize) }
+            }
+            Storage::Owned(raw) => &raw[offset..offset + self.itemsize],
+        };
 
         decode_value(bytes, self.dtype)
     }

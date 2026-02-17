@@ -1,3 +1,4 @@
+mod arrow;
 mod buffer;
 mod core;
 mod dtype;

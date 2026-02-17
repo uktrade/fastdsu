@@ -3,6 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #   "numpy>=1.26",
+#   "polars>=1.0",
 #   "pyarrow>=18.0",
 #   "scipy>=1.11",
 #   "networkx>=3.3",
@@ -10,22 +11,33 @@
 #   "matplotlib>=3.8",
 #   "seaborn>=0.13",
 #   "rich>=13.9",
+#   "memray>=1.12",
 # ]
 # ///
 
-"""Benchmark `fastdsu` against alternative connected-components implementations."""
+"""Benchmark connected-components backends from a Polars edge list.
+
+Every backend starts from the same `polars` edge list (`src`, `dst`) and returns
+component labels as a `polars.Series` with one label per node.
+"""
 
 from __future__ import annotations
 
 import dataclasses
+import statistics
+import subprocess
+import sys
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import memray
 import networkx as nx
 import numpy as np
 import pandas as pd
+import polars as pl
 import pyarrow as pa
 import seaborn as sns
 from fastdsu import DType, connected_components
@@ -35,6 +47,24 @@ from scipy.sparse.csgraph import connected_components as scipy_connected_compone
 
 SEED = 42
 OUTPUT_PATH = Path("demos/comparison.png")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BASE_PACKAGES = ["polars>=1.0", "pyarrow>=18.0"]
+INSTALL_SIZE_BASELINE_BACKEND = "python_dsu"
+IMPORT_TIME_BASELINE_BACKEND = "python_dsu"
+IMPORT_TIME_RUNS = 20
+INSTALL_SIZE_PACKAGES: dict[str, list[str]] = {
+    # pyarrow is optional in polars and required for this Arrow-backed benchmark.
+    "fastdsu": [str(PROJECT_ROOT), *BASE_PACKAGES],
+    "scipy": ["scipy>=1.11", *BASE_PACKAGES],
+    "networkx": ["networkx>=3.3", *BASE_PACKAGES],
+    "python_dsu": [*BASE_PACKAGES],
+}
+IMPORT_MODULES: dict[str, list[str]] = {
+    "fastdsu": ["polars", "pyarrow", "fastdsu"],
+    "scipy": ["polars", "pyarrow", "scipy", "scipy.sparse", "scipy.sparse.csgraph"],
+    "networkx": ["polars", "pyarrow", "networkx"],
+    "python_dsu": ["polars", "pyarrow"],
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,10 +82,8 @@ class Inputs:
     """Prepared edge inputs for one benchmark scale."""
 
     scale: Scale
-    src_np: np.ndarray
-    dst_np: np.ndarray
-    src_pa: pa.Array
-    dst_pa: pa.Array
+    edges_pl: pl.DataFrame
+    pl_dtype: pl.DataType
     dtype: DType
 
 
@@ -95,18 +123,18 @@ class PythonDSU:
         return True
 
 
-def choose_dtype(num_nodes: int) -> tuple[np.dtype, pa.DataType, DType]:
+def choose_dtype(num_nodes: int) -> tuple[np.dtype, pl.DataType, DType]:
     """Choose the smallest unsigned integer dtype that fits node IDs."""
     if num_nodes <= np.iinfo(np.uint16).max:
-        return np.dtype(np.uint16), pa.uint16(), DType.uint16
+        return np.dtype(np.uint16), pl.UInt16, DType.uint16
     if num_nodes <= np.iinfo(np.uint32).max:
-        return np.dtype(np.uint32), pa.uint32(), DType.uint32
-    return np.dtype(np.uint64), pa.uint64(), DType.uint64
+        return np.dtype(np.uint32), pl.UInt32, DType.uint32
+    return np.dtype(np.uint64), pl.UInt64, DType.uint64
 
 
 def generate_scale_inputs(scale: Scale, seed: int) -> Inputs:
     """Generate one graph scale and materialise its edge arrays."""
-    np_dtype, pa_dtype, fast_dtype = choose_dtype(scale.num_nodes)
+    np_dtype, pl_dtype, fast_dtype = choose_dtype(scale.num_nodes)
 
     graph = nx.random_geometric_graph(
         scale.num_nodes,
@@ -128,117 +156,314 @@ def generate_scale_inputs(scale: Scale, seed: int) -> Inputs:
     src_np = packed[0::2].astype(np_dtype, copy=False)
     dst_np = packed[1::2].astype(np_dtype, copy=False)
 
-    src_pa = pa.array(src_np, type=pa_dtype)
-    dst_pa = pa.array(dst_np, type=pa_dtype)
+    edges_pl = pl.DataFrame(
+        {
+            "src": pl.Series("src", src_np, dtype=pl_dtype),
+            "dst": pl.Series("dst", dst_np, dtype=pl_dtype),
+        }
+    )
 
     return Inputs(
         scale=scale,
-        src_np=src_np,
-        dst_np=dst_np,
-        src_pa=src_pa,
-        dst_pa=dst_pa,
+        edges_pl=edges_pl,
+        pl_dtype=pl_dtype,
         dtype=fast_dtype,
     )
 
 
-def run_fastdsu(data: Inputs) -> int:
-    """Run the `fastdsu` backend and return component count."""
-    try:
-        src_view = data.src_pa.to_numpy(zero_copy_only=True)
-        dst_view = data.dst_pa.to_numpy(zero_copy_only=True)
-    except (pa.ArrowException, NotImplementedError, ValueError):
-        # Fallback for Arrow implementations that cannot expose a zero-copy view.
-        src_view = data.src_pa.to_numpy(zero_copy_only=False)
-        dst_view = data.dst_pa.to_numpy(zero_copy_only=False)
+def run_fastdsu(data: Inputs) -> pl.Series:
+    """Run the `fastdsu` backend and return component labels."""
+    src_pa: pa.Array = data.edges_pl.get_column("src").to_arrow()
+    dst_pa: pa.Array = data.edges_pl.get_column("dst").to_arrow()
     labels = connected_components(
-        src_view,
-        dst_view,
+        src_pa,
+        dst_pa,
         num_nodes=data.scale.num_nodes,
         dtype=data.dtype,
     )
-    return len(set(labels.to_list()))
+    return pl.Series(name="component", values=labels)
 
 
-def run_scipy(data: Inputs) -> int:
-    """Run SciPy connected components and return component count."""
-    rows = np.concatenate((data.src_np, data.dst_np), dtype=np.int64)
-    cols = np.concatenate((data.dst_np, data.src_np), dtype=np.int64)
+def run_scipy(data: Inputs) -> pl.Series:
+    """Run SciPy connected components and return component labels."""
+    src_np = data.edges_pl.get_column("src").to_numpy()
+    dst_np = data.edges_pl.get_column("dst").to_numpy()
+
+    rows = np.concatenate((src_np, dst_np), dtype=np.int64)
+    cols = np.concatenate((dst_np, src_np), dtype=np.int64)
     vals = np.ones(rows.shape[0], dtype=np.uint8)
 
     matrix = coo_matrix(
         (vals, (rows, cols)), shape=(data.scale.num_nodes, data.scale.num_nodes)
     ).tocsr()
-    n_components, _ = scipy_connected_components(
+    _, labels = scipy_connected_components(
         matrix,
         directed=False,
         return_labels=True,
     )
-    return int(n_components)
+    return pl.Series(name="component", values=labels)
 
 
-def run_networkx(data: Inputs) -> int:
-    """Run NetworkX connected components and return component count."""
+def run_networkx(data: Inputs) -> pl.Series:
+    """Run NetworkX connected components and return component labels."""
+    src_np = data.edges_pl.get_column("src").to_numpy()
+    dst_np = data.edges_pl.get_column("dst").to_numpy()
+
     graph = nx.Graph()
     graph.add_nodes_from(range(data.scale.num_nodes))
-    graph.add_edges_from(zip(data.src_np.tolist(), data.dst_np.tolist(), strict=True))
-    return nx.number_connected_components(graph)
+    graph.add_edges_from(zip(src_np.tolist(), dst_np.tolist(), strict=True))
+
+    labels = np.empty(data.scale.num_nodes, dtype=np.int64)
+    for component_id, nodes in enumerate(nx.connected_components(graph)):
+        for node in nodes:
+            labels[int(node)] = component_id
+    return pl.Series(name="component", values=labels)
 
 
-def run_python_dsu(data: Inputs) -> int:
-    """Run the pure-Python DSU baseline and return component count."""
+def run_python_dsu(data: Inputs) -> pl.Series:
+    """Run the pure-Python DSU baseline and return component labels."""
+    src_np = data.edges_pl.get_column("src").to_numpy()
+    dst_np = data.edges_pl.get_column("dst").to_numpy()
+
     dsu = PythonDSU(data.scale.num_nodes)
-    for left, right in zip(data.src_np, data.dst_np, strict=True):
+    for left, right in zip(src_np, dst_np, strict=True):
         dsu.union(int(left), int(right))
 
-    roots = {dsu.find(idx) for idx in range(data.scale.num_nodes)}
-    return len(roots)
+    labels = np.empty(data.scale.num_nodes, dtype=np.int64)
+    root_to_component: dict[int, int] = {}
+    for idx in range(data.scale.num_nodes):
+        root = dsu.find(idx)
+        component = root_to_component.setdefault(root, len(root_to_component))
+        labels[idx] = component
+    return pl.Series(name="component", values=labels)
+
+
+def normalize_component_labels(labels: pl.Series) -> np.ndarray:
+    """Canonicalize labels so partitions can be compared across backends."""
+    values = labels.to_numpy()
+    normalized = np.empty(values.shape[0], dtype=np.int64)
+    mapping: dict[int, int] = {}
+    next_component = 0
+    for idx, raw in enumerate(values):
+        label = int(raw)
+        component = mapping.get(label)
+        if component is None:
+            component = next_component
+            mapping[label] = component
+            next_component += 1
+        normalized[idx] = component
+    return normalized
 
 
 def benchmark(
-    name: str, fn: Callable[[Inputs], int], data: Inputs, repeats: int
-) -> tuple[float, int]:
-    """Time one backend and return its best runtime and components."""
+    name: str, fn: Callable[[Inputs], pl.Series], data: Inputs, repeats: int
+) -> tuple[float, pl.Series, int]:
+    """Time one backend and return best runtime, component labels, and peak bytes."""
     elapsed: list[float] = []
-    components = -1
+    labels: pl.Series | None = None
 
     for _ in range(repeats):
         start = time.perf_counter()
-        components = fn(data)
+        labels = fn(data)
         elapsed.append(time.perf_counter() - start)
 
-    return float(min(elapsed)), components
+    if labels is None:
+        raise RuntimeError(f"benchmark {name!r} did not produce labels")
+
+    peak_bytes = peak_memory_bytes(fn, data)
+    return float(min(elapsed)), labels, peak_bytes
+
+
+def peak_memory_bytes(
+    func: Callable[..., object], *args: object, **kwargs: object
+) -> int:
+    """Measure peak memory use (bytes) for one call via memray."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "memray-trace.bin"
+        with memray.Tracker(str(path)):
+            func(*args, **kwargs)
+        reader = memray.FileReader(str(path))
+        return int(reader.metadata.peak_memory)
+
+
+def measure_install_size(packages: list[str], *, no_deps: bool = False) -> int:
+    """Measure installed size in bytes for a package set in an isolated target dir."""
+    if not packages:
+        return 0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        target = Path(tmpdir) / "site-packages"
+        target.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--target",
+            str(target),
+            "--quiet",
+            "--no-cache",
+            *packages,
+        ]
+        if no_deps:
+            cmd.append("--no-deps")
+
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Install size measurement failed for "
+                f"{packages!r}: {result.stderr.strip()}"
+            )
+
+        return sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
+
+
+def measure_import_time(modules: list[str], runs: int = IMPORT_TIME_RUNS) -> float:
+    """Measure median cold-process import time (seconds) for a list of modules."""
+    if runs < 1:
+        raise ValueError("runs must be >= 1")
+
+    code = (
+        "import importlib,time;"
+        f"mods={modules!r};"
+        "t=time.perf_counter();"
+        "[importlib.import_module(m) for m in mods];"
+        "print(time.perf_counter()-t)"
+    )
+    times: list[float] = []
+    for _ in range(runs):
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Import-time measurement failed for "
+                f"{modules!r}: {result.stderr.strip()}"
+            )
+        times.append(float(result.stdout.strip()))
+
+    return float(statistics.median(times))
 
 
 def plot_results(df: pd.DataFrame, out_path: Path) -> None:
-    """Plot benchmark results and save to disk."""
+    """Plot runtime, memory, install-size, and import-time facets and save to disk."""
     sns.set_theme(style="whitegrid", context="talk")
 
-    plt.figure(figsize=(12, 7))
-    ax = sns.barplot(
-        data=df,
-        x="scale",
-        y="seconds",
-        hue="backend",
-        order=["low", "medium", "high"],
-        hue_order=["fastdsu", "scipy", "networkx", "python_dsu"],
+    runtime_memory_df = pd.concat(
+        [
+            df.assign(metric="Runtime (seconds)", value=df["seconds"]),
+            df.assign(
+                metric="Peak memory (MiB)",
+                value=df["peak_memory_bytes"] / (1024 * 1024),
+            ),
+        ],
+        ignore_index=True,
+    )
+    install_df = (
+        df[["backend", "install_size_extra_bytes"]]
+        .drop_duplicates(subset=["backend"])
+        .assign(value=lambda frame: frame["install_size_extra_bytes"] / (1024 * 1024))
+    )
+    import_df = (
+        df[["backend", "import_extra_seconds"]]
+        .drop_duplicates(subset=["backend"])
+        .assign(value=lambda frame: frame["import_extra_seconds"] * 1_000)
     )
 
-    ax.set_yscale("log")
-    ax.set_ylabel("Runtime (seconds, log scale)")
-    ax.set_xlabel("Scale")
-    ax.set_title("Connected components: fastdsu vs alternatives")
+    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    runtime_ax = axes[0, 0]
+    memory_ax = axes[0, 1]
+    install_ax = axes[1, 0]
+    import_ax = axes[1, 1]
+    metric_order = ["Runtime (seconds)", "Peak memory (MiB)"]
+    scale_order = ["low", "medium", "high"]
+    hue_order = ["fastdsu", "scipy", "networkx", "python_dsu"]
 
-    for _, row in df.drop_duplicates(subset=["scale"]).iterrows():
-        ax.text(
-            x=["low", "medium", "high"].index(row["scale"]),
-            y=df["seconds"].max() * 1.08,
-            s=f"{int(row['num_nodes']):,} nodes\n{int(row['num_edges']):,} edges",
-            ha="center",
-            va="bottom",
-            fontsize=10,
+    for ax, metric in zip((runtime_ax, memory_ax), metric_order, strict=True):
+        panel = runtime_memory_df[runtime_memory_df["metric"] == metric]
+        sns.barplot(
+            data=panel,
+            x="scale",
+            y="value",
+            hue="backend",
+            order=scale_order,
+            hue_order=hue_order,
+            ax=ax,
         )
 
-    plt.tight_layout()
+        if metric == "Runtime (seconds)":
+            ax.set_yscale("log")
+            y_text = panel["value"].max() * 1.08
+            ax.set_ylabel("Runtime (seconds, log scale)")
+        else:
+            y_text = panel["value"].max() * 1.02
+            ax.set_ylabel("Peak memory (MiB)")
+
+        ax.set_title(metric)
+        ax.set_xlabel("Scale")
+
+        for _, row in panel.drop_duplicates(subset=["scale"]).iterrows():
+            ax.text(
+                x=scale_order.index(row["scale"]),
+                y=y_text,
+                s=f"{int(row['num_nodes']):,} nodes\n{int(row['num_edges']):,} edges",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+            )
+
+    sns.barplot(
+        data=install_df,
+        x="backend",
+        y="value",
+        order=hue_order,
+        hue=None,
+        ax=install_ax,
+    )
+    install_ax.set_title("Extra install size (MiB)")
+    install_ax.set_xlabel("Backend")
+    install_ax.set_ylabel(f"Extra size vs {INSTALL_SIZE_BASELINE_BACKEND} (MiB)")
+    install_ax.tick_params(axis="x", rotation=20)
+
+    sns.barplot(
+        data=import_df,
+        x="backend",
+        y="value",
+        order=hue_order,
+        hue=None,
+        ax=import_ax,
+    )
+    import_ax.set_title("Extra import time (ms)")
+    import_ax.set_xlabel("Backend")
+    import_ax.set_ylabel(f"Extra import time vs {IMPORT_TIME_BASELINE_BACKEND} (ms)")
+    import_ax.tick_params(axis="x", rotation=20)
+
+    fig.suptitle("Connected components: fastdsu vs alternatives", y=0.99)
+    handles, labels = runtime_ax.get_legend_handles_labels()
+    for ax in (runtime_ax, memory_ax):
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=4,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.965),
+    )
+
+    plt.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path, dpi=180)
     plt.close()
@@ -246,7 +471,7 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
 
 def main() -> None:
     """Run all benchmark scales and write the comparison plot."""
-    backends: list[tuple[str, Callable[[Inputs], int]]] = [
+    backends: list[tuple[str, Callable[[Inputs], pl.Series]]] = [
         ("fastdsu", run_fastdsu),
         ("scipy", run_scipy),
         ("networkx", run_networkx),
@@ -254,42 +479,118 @@ def main() -> None:
     ]
 
     rows: list[dict[str, object]] = []
+    install_size_by_backend: dict[str, int] = {}
+    import_seconds_by_backend: dict[str, float] = {}
+
+    rprint()
+    rprint("[bold cyan]dependency install size (delta view)[/bold cyan]")
+    for backend_name, _ in backends:
+        packages = INSTALL_SIZE_PACKAGES[backend_name]
+        install_size = measure_install_size(packages)
+        install_size_by_backend[backend_name] = install_size
+
+    baseline_install_size = install_size_by_backend[INSTALL_SIZE_BASELINE_BACKEND]
+    baseline_mib = baseline_install_size / (1024 * 1024)
+    baseline_packages = ", ".join(INSTALL_SIZE_PACKAGES[INSTALL_SIZE_BASELINE_BACKEND])
+    rprint(
+        f"  baseline [green]{INSTALL_SIZE_BASELINE_BACKEND}[/green] "
+        f"= {baseline_mib:>8.1f} MiB  packages={baseline_packages}"
+    )
+
+    for backend_name, _ in backends:
+        packages = INSTALL_SIZE_PACKAGES[backend_name]
+        install_size = install_size_by_backend[backend_name]
+        install_extra = install_size - baseline_install_size
+        install_extra_mib = install_extra / (1024 * 1024)
+        package_text = ", ".join(packages) if packages else "(none)"
+        rprint(
+            f"  - [green]{backend_name:<10}[/green] "
+            f"extra={install_extra_mib:>8.1f} MiB  packages={package_text}"
+        )
+
+    rprint()
+    rprint("[bold cyan]module import time (delta view)[/bold cyan]")
+    for backend_name, _ in backends:
+        modules = IMPORT_MODULES[backend_name]
+        import_seconds = measure_import_time(modules, runs=IMPORT_TIME_RUNS)
+        import_seconds_by_backend[backend_name] = import_seconds
+
+    baseline_import_seconds = import_seconds_by_backend[IMPORT_TIME_BASELINE_BACKEND]
+    baseline_import_ms = baseline_import_seconds * 1_000
+    baseline_modules = ", ".join(IMPORT_MODULES[IMPORT_TIME_BASELINE_BACKEND])
+    rprint(
+        f"  baseline [green]{IMPORT_TIME_BASELINE_BACKEND}[/green] "
+        f"= {baseline_import_ms:>8.1f} ms  modules={baseline_modules}"
+    )
+
+    for backend_name, _ in backends:
+        modules = IMPORT_MODULES[backend_name]
+        import_seconds = import_seconds_by_backend[backend_name]
+        import_extra_seconds = import_seconds - baseline_import_seconds
+        import_extra_ms = import_extra_seconds * 1_000
+        module_text = ", ".join(modules)
+        rprint(
+            f"  - [green]{backend_name:<10}[/green] "
+            f"extra={import_extra_ms:>8.1f} ms  modules={module_text}"
+        )
 
     for idx, scale in enumerate(SCALES):
         data = generate_scale_inputs(scale, seed=SEED + idx)
-        num_edges = int(data.src_np.size)
+        num_edges = int(data.edges_pl.height)
 
         rprint()
         rprint(
             f"[bold cyan]scale={scale.name}[/bold cyan] "
             f"nodes={scale.num_nodes:,} edges={num_edges:,} "
-            f"dtype={data.dtype.name} repeats={scale.repeats}"
+            f"dtype={data.pl_dtype} repeats={scale.repeats}"
         )
 
-        component_reference: int | None = None
+        component_reference: np.ndarray | None = None
         for backend_name, backend_fn in backends:
-            seconds, n_components = benchmark(
+            seconds, labels, peak_bytes = benchmark(
                 backend_name,
                 backend_fn,
                 data,
                 repeats=scale.repeats,
             )
-
-            if component_reference is None:
-                component_reference = n_components
-            elif n_components != component_reference:
+            if labels.len() != scale.num_nodes:
                 raise RuntimeError(
-                    f"component mismatch for scale={scale.name}: "
-                    f"expected={component_reference}, "
-                    f"got={n_components} ({backend_name})"
+                    f"label length mismatch for scale={scale.name}: "
+                    f"expected={scale.num_nodes}, got={labels.len()} ({backend_name})"
                 )
 
-            rprint(f"  - [green]{backend_name:<10}[/green] {seconds:>9.4f}s")
+            normalized = normalize_component_labels(labels)
+            n_components = int(labels.n_unique())
+
+            if component_reference is None:
+                component_reference = normalized
+            elif not np.array_equal(normalized, component_reference):
+                raise RuntimeError(
+                    f"component mismatch for scale={scale.name}: "
+                    f"partition differed from reference ({backend_name})"
+                )
+
+            peak_mib = peak_bytes / (1024 * 1024)
+            rprint(
+                f"  - [green]{backend_name:<10}[/green] "
+                f"{seconds:>9.4f}s peak={peak_mib:>8.1f} MiB "
+                f"components={n_components}"
+            )
             rows.append(
                 {
                     "scale": scale.name,
                     "backend": backend_name,
                     "seconds": seconds,
+                    "peak_memory_bytes": peak_bytes,
+                    "install_size_bytes": install_size_by_backend[backend_name],
+                    "install_size_extra_bytes": (
+                        install_size_by_backend[backend_name] - baseline_install_size
+                    ),
+                    "import_seconds": import_seconds_by_backend[backend_name],
+                    "import_extra_seconds": (
+                        import_seconds_by_backend[backend_name]
+                        - baseline_import_seconds
+                    ),
                     "num_nodes": scale.num_nodes,
                     "num_edges": num_edges,
                 }

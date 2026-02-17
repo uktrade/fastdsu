@@ -1,8 +1,16 @@
 use crate::dtype::{DTypeKind, decode_value, push_value_bytes};
+use arrow_array::{
+    ArrayRef, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
+};
+use arrow_schema::Field;
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::types::{PyCapsule, PyTuple};
+use pyo3_arrow::ffi::to_array_pycapsules;
 use std::ffi::{CString, c_int, c_void};
+use std::sync::Arc;
 
 #[pyclass(module = "fastdsu._core")]
 pub(crate) struct Labels {
@@ -30,6 +38,16 @@ impl Labels {
             dtype,
         })
     }
+
+    fn decoded_values(&self) -> Vec<i128> {
+        let mut out = Vec::with_capacity(self.len);
+        let stride = self.dtype.itemsize();
+        for idx in 0..self.len {
+            let start = idx * stride;
+            out.push(decode_value(&self.data[start..start + stride], self.dtype));
+        }
+        out
+    }
 }
 
 #[pymethods]
@@ -39,13 +57,45 @@ impl Labels {
     }
 
     fn to_list(&self) -> Vec<i128> {
-        let mut out = Vec::with_capacity(self.len);
-        let stride = self.dtype.itemsize();
-        for idx in 0..self.len {
-            let start = idx * stride;
-            out.push(decode_value(&self.data[start..start + stride], self.dtype));
-        }
-        out
+        self.decoded_values()
+    }
+
+    #[pyo3(signature = (requested_schema=None))]
+    fn __arrow_c_array__<'py>(
+        &'py self,
+        py: Python<'py>,
+        requested_schema: Option<Bound<'py, PyCapsule>>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let values = self.decoded_values();
+        let array: ArrayRef = match self.dtype {
+            DTypeKind::I8 => Arc::new(Int8Array::from(
+                values.iter().map(|&value| value as i8).collect::<Vec<_>>(),
+            )),
+            DTypeKind::U8 => Arc::new(UInt8Array::from(
+                values.iter().map(|&value| value as u8).collect::<Vec<_>>(),
+            )),
+            DTypeKind::I16 => Arc::new(Int16Array::from(
+                values.iter().map(|&value| value as i16).collect::<Vec<_>>(),
+            )),
+            DTypeKind::U16 => Arc::new(UInt16Array::from(
+                values.iter().map(|&value| value as u16).collect::<Vec<_>>(),
+            )),
+            DTypeKind::I32 => Arc::new(Int32Array::from(
+                values.iter().map(|&value| value as i32).collect::<Vec<_>>(),
+            )),
+            DTypeKind::U32 => Arc::new(UInt32Array::from(
+                values.iter().map(|&value| value as u32).collect::<Vec<_>>(),
+            )),
+            DTypeKind::I64 => Arc::new(Int64Array::from(
+                values.iter().map(|&value| value as i64).collect::<Vec<_>>(),
+            )),
+            DTypeKind::U64 => Arc::new(UInt64Array::from(
+                values.iter().map(|&value| value as u64).collect::<Vec<_>>(),
+            )),
+        };
+
+        let field = Arc::new(Field::new("", array.data_type().clone(), false));
+        to_array_pycapsules(py, field, array.as_ref(), requested_schema).map_err(Into::into)
     }
 
     unsafe fn __getbuffer__(

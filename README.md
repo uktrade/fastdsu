@@ -2,7 +2,7 @@
 
 A Python [disjoint sets](https://en.wikipedia.org/wiki/Disjoint-set_data_structure) implementation at Rust speed.
 
-Supports any buffer protocol-enabled types for nodes and edges, such as NumPy arrays and Arrow arrays, without either needing to be a dependency.
+Supports buffer protocol-enabled types and Arrow C PyCapsule exporters for nodes and edges, such as NumPy arrays, `pyarrow.Array` (`__arrow_c_array__`), and `pyarrow.ChunkedArray` (`__arrow_c_stream__`), without either needing to be a dependency.
 
 ## Why another implementation?
 
@@ -14,15 +14,24 @@ If you need disjoint sets in Python you have a few options:
 
 We aim to be faster and more memory efficient that pure Python, while requiring fewer and smaller dependencies than SciPy or a graph library.
 
-Other implementations typically allow you to work with any hashable type. We instead accept data via the buffer protocol, allowing zero-copy ingestion for minimal memory footprint, and disjoint set calculation over any protocol compatible type. We also support any integer width, so you can further optimise memory use for your setting.
+Other implementations typically allow you to work with any hashable type. We instead accept data via the buffer protocol and Arrow C Data PyCapsule interfaces, allowing zero-copy ingestion for minimal memory footprint, and disjoint set calculation over any compatible integer type. We also support any integer width, so you can further optimise memory use for your setting.
 
-Other implementations can require building large objects unrelated to the core operation, such as a sparse matrix or a graph. By using the buffer protocol, we do
+Other implementations can require building large objects unrelated to the core operation, such as a sparse matrix or a graph. By using the buffer protocol, we use significantly less memory, and do less work.
 
 This is a highly performant disjoint set implementation made for production use cases.
+
+The following benchmark is to convert a Polars edgelist to a polars Series of its components.
 
 ![Comparison of approaches](demos/comparison.png)
 
 ## Usage
+
+Inputs can be provided through either:
+
+* The Python buffer protocol.
+* Arrow PyCapsule exporters: `__arrow_c_array__` and `__arrow_c_stream__`.
+
+For Arrow inputs, nullable integer arrays are supported, but arrays containing actual null values are rejected.
 
 ### Stateless
 
@@ -40,6 +49,11 @@ src = pa.array([0, 1, 3, 4], type=pa.uint8())
 dst = pa.array([1, 2, 4, 5], type=pa.uint8())
 labels = connected_components(src, dst, num_nodes=6)
 # labels: [0, 0, 0, 3, 3, 3]
+
+# Chunked arrays (stream export) work too
+chunked_src = pa.chunked_array([[0, 1], [3, 4]], type=pa.uint8())
+chunked_dst = pa.chunked_array([[1, 2], [4, 5]], type=pa.uint8())
+labels = connected_components(chunked_src, chunked_dst, num_nodes=6)
 
 # Works with numpy too — anything supporting the buffer protocol
 labels = connected_components(np.array([0, 1]), np.array([1, 2]))

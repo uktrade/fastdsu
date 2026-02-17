@@ -1,3 +1,4 @@
+use arrow_schema::DataType;
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
@@ -196,6 +197,22 @@ pub(crate) fn parse_buffer_dtype(format: &CStr, itemsize: usize) -> PyResult<DTy
     Ok(dtype)
 }
 
+pub(crate) fn parse_arrow_dtype(data_type: &DataType) -> PyResult<DTypeKind> {
+    match data_type {
+        DataType::Int8 => Ok(DTypeKind::I8),
+        DataType::UInt8 => Ok(DTypeKind::U8),
+        DataType::Int16 => Ok(DTypeKind::I16),
+        DataType::UInt16 => Ok(DTypeKind::U16),
+        DataType::Int32 => Ok(DTypeKind::I32),
+        DataType::UInt32 => Ok(DTypeKind::U32),
+        DataType::Int64 => Ok(DTypeKind::I64),
+        DataType::UInt64 => Ok(DTypeKind::U64),
+        _ => Err(PyBufferError::new_err(format!(
+            "unsupported Arrow integer dtype: {data_type}",
+        ))),
+    }
+}
+
 pub(crate) fn promote_stateless(dtypes: &[DTypeKind]) -> PyResult<DTypeKind> {
     if dtypes.is_empty() {
         return Err(PyValueError::new_err("no dtypes provided for promotion"));
@@ -319,6 +336,7 @@ pub(crate) fn decode_value(bytes: &[u8], dtype: DTypeKind) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_schema::DataType;
 
     #[test]
     fn promotion_rules() {
@@ -346,5 +364,32 @@ mod tests {
             DTypeKind::from_name_or_code("dtype.uint16"),
             Some(DTypeKind::U16)
         );
+    }
+
+    #[test]
+    fn parse_arrow_integer_dtypes() {
+        assert_eq!(parse_arrow_dtype(&DataType::Int8).unwrap(), DTypeKind::I8);
+        assert_eq!(parse_arrow_dtype(&DataType::UInt8).unwrap(), DTypeKind::U8);
+        assert_eq!(parse_arrow_dtype(&DataType::Int16).unwrap(), DTypeKind::I16);
+        assert_eq!(
+            parse_arrow_dtype(&DataType::UInt16).unwrap(),
+            DTypeKind::U16
+        );
+        assert_eq!(parse_arrow_dtype(&DataType::Int32).unwrap(), DTypeKind::I32);
+        assert_eq!(
+            parse_arrow_dtype(&DataType::UInt32).unwrap(),
+            DTypeKind::U32
+        );
+        assert_eq!(parse_arrow_dtype(&DataType::Int64).unwrap(), DTypeKind::I64);
+        assert_eq!(
+            parse_arrow_dtype(&DataType::UInt64).unwrap(),
+            DTypeKind::U64
+        );
+    }
+
+    #[test]
+    fn parse_arrow_dtype_rejects_unsupported() {
+        assert!(parse_arrow_dtype(&DataType::Float32).is_err());
+        assert!(parse_arrow_dtype(&DataType::Utf8).is_err());
     }
 }
