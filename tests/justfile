@@ -1,0 +1,12 @@
+set working-directory := ".."
+
+# Run all tests
+default: python rust
+
+# Run only Python tests
+python *ARGS:
+    uv run pytest {{ARGS}}
+
+# Run only Rust tests
+rust *ARGS:
+    cargo test -p fastdsu {{ARGS}}

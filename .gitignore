@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+dist/
+wheels/
+
+# Compiled extensions
+*.so
+*.pyd
+
+# Rust
+target/
+
+# uv / virtualenvs
+.venv
+
+# Editor
+.vscode/
+.idea/
+*.sw[po]
+
+# OS
+.DS_Store
+Thumbs.db
