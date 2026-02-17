@@ -3,6 +3,14 @@ name = "fastdsu"
 version = "0.1.0"
 edition = "2024"
 
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+missing_docs_in_private_items = "deny"
+undocumented_unsafe_blocks = "deny"
+
 [lib]
 name = "_core"
 # "cdylib" is necessary to produce a shared library for Python to import from.

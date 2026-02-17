@@ -1,22 +1,34 @@
+//! Dtype parsing, promotion, and byte conversion helpers.
+
 use arrow_schema::DataType;
 use pyo3::exceptions::{PyBufferError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::ffi::CStr;
 
+/// Integer dtype variants accepted by this crate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DTypeKind {
+    /// Signed 8-bit integer.
     I8,
+    /// Signed 16-bit integer.
     I16,
+    /// Signed 32-bit integer.
     I32,
+    /// Signed 64-bit integer.
     I64,
+    /// Unsigned 8-bit integer.
     U8,
+    /// Unsigned 16-bit integer.
     U16,
+    /// Unsigned 32-bit integer.
     U32,
+    /// Unsigned 64-bit integer.
     U64,
 }
 
 impl DTypeKind {
+    /// Return the canonical Python buffer format code for this dtype.
     pub(crate) fn format_code(self) -> u8 {
         match self {
             Self::I8 => b'b',
@@ -30,6 +42,7 @@ impl DTypeKind {
         }
     }
 
+    /// Return the width in bytes for this dtype.
     pub(crate) fn itemsize(self) -> usize {
         match self {
             Self::I8 | Self::U8 => 1,
@@ -39,10 +52,12 @@ impl DTypeKind {
         }
     }
 
+    /// Return whether this dtype is signed.
     pub(crate) fn is_signed(self) -> bool {
         matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
     }
 
+    /// Return the bit-width for this dtype.
     pub(crate) fn bits(self) -> u8 {
         match self {
             Self::I8 | Self::U8 => 8,
@@ -52,33 +67,37 @@ impl DTypeKind {
         }
     }
 
+    /// Return the inclusive minimum value for this dtype.
     pub(crate) fn min_value(self) -> i128 {
         match self {
-            Self::I8 => i8::MIN as i128,
-            Self::I16 => i16::MIN as i128,
-            Self::I32 => i32::MIN as i128,
-            Self::I64 => i64::MIN as i128,
+            Self::I8 => i128::from(i8::MIN),
+            Self::I16 => i128::from(i16::MIN),
+            Self::I32 => i128::from(i32::MIN),
+            Self::I64 => i128::from(i64::MIN),
             Self::U8 | Self::U16 | Self::U32 | Self::U64 => 0,
         }
     }
 
+    /// Return the inclusive maximum value for this dtype.
     pub(crate) fn max_value(self) -> i128 {
         match self {
-            Self::I8 => i8::MAX as i128,
-            Self::I16 => i16::MAX as i128,
-            Self::I32 => i32::MAX as i128,
-            Self::I64 => i64::MAX as i128,
-            Self::U8 => u8::MAX as i128,
-            Self::U16 => u16::MAX as i128,
-            Self::U32 => u32::MAX as i128,
-            Self::U64 => u64::MAX as i128,
+            Self::I8 => i128::from(i8::MAX),
+            Self::I16 => i128::from(i16::MAX),
+            Self::I32 => i128::from(i32::MAX),
+            Self::I64 => i128::from(i64::MAX),
+            Self::U8 => i128::from(u8::MAX),
+            Self::U16 => i128::from(u16::MAX),
+            Self::U32 => i128::from(u32::MAX),
+            Self::U64 => i128::from(u64::MAX),
         }
     }
 
+    /// Return whether `value` can be represented by this dtype.
     pub(crate) fn contains(self, value: i128) -> bool {
         value >= self.min_value() && value <= self.max_value()
     }
 
+    /// Build a dtype from signedness and bit-width.
     pub(crate) fn from_fixed_bits(is_signed: bool, bits: u8) -> Option<Self> {
         match (is_signed, bits) {
             (true, 8) => Some(Self::I8),
@@ -93,6 +112,7 @@ impl DTypeKind {
         }
     }
 
+    /// Parse either a format code (`"I"`) or a name (`"uint32"`, `"u32"`).
     pub(crate) fn from_name_or_code(raw: &str) -> Option<Self> {
         let trimmed = raw.trim();
         if trimmed.len() == 1 {
@@ -126,6 +146,7 @@ impl DTypeKind {
     }
 }
 
+/// Parse a Python dtype hint accepted by the public API.
 pub(crate) fn parse_dtype_spec(dtype: &Bound<'_, PyAny>) -> PyResult<DTypeKind> {
     if let Ok(text) = dtype.extract::<String>()
         && let Some(parsed) = DTypeKind::from_name_or_code(&text)
@@ -150,6 +171,7 @@ pub(crate) fn parse_dtype_spec(dtype: &Bound<'_, PyAny>) -> PyResult<DTypeKind> 
     )))
 }
 
+/// Parse a Python buffer format and itemsize into a supported integer dtype.
 pub(crate) fn parse_buffer_dtype(format: &CStr, itemsize: usize) -> PyResult<DTypeKind> {
     let bytes = format.to_bytes();
     let (prefix, code) = match bytes {
@@ -175,12 +197,14 @@ pub(crate) fn parse_buffer_dtype(format: &CStr, itemsize: usize) -> PyResult<DTy
         b'H' => DTypeKind::from_fixed_bits(false, 16),
         b'i' => DTypeKind::from_fixed_bits(true, 32),
         b'I' => DTypeKind::from_fixed_bits(false, 32),
-        b'l' => DTypeKind::from_fixed_bits(true, (itemsize as u8) * 8),
-        b'L' => DTypeKind::from_fixed_bits(false, (itemsize as u8) * 8),
+        b'l' | b'n' => {
+            itemsize_to_bits(itemsize).and_then(|bits| DTypeKind::from_fixed_bits(true, bits))
+        }
+        b'L' | b'N' => {
+            itemsize_to_bits(itemsize).and_then(|bits| DTypeKind::from_fixed_bits(false, bits))
+        }
         b'q' => DTypeKind::from_fixed_bits(true, 64),
         b'Q' => DTypeKind::from_fixed_bits(false, 64),
-        b'n' => DTypeKind::from_fixed_bits(true, (itemsize as u8) * 8),
-        b'N' => DTypeKind::from_fixed_bits(false, (itemsize as u8) * 8),
         _ => None,
     };
 
@@ -197,6 +221,7 @@ pub(crate) fn parse_buffer_dtype(format: &CStr, itemsize: usize) -> PyResult<DTy
     Ok(dtype)
 }
 
+/// Parse an Arrow datatype into a supported integer dtype.
 pub(crate) fn parse_arrow_dtype(data_type: &DataType) -> PyResult<DTypeKind> {
     match data_type {
         DataType::Int8 => Ok(DTypeKind::I8),
@@ -213,6 +238,7 @@ pub(crate) fn parse_arrow_dtype(data_type: &DataType) -> PyResult<DTypeKind> {
     }
 }
 
+/// Promote multiple dtypes to one stateless working dtype.
 pub(crate) fn promote_stateless(dtypes: &[DTypeKind]) -> PyResult<DTypeKind> {
     if dtypes.is_empty() {
         return Err(PyValueError::new_err("no dtypes provided for promotion"));
@@ -257,7 +283,7 @@ pub(crate) fn promote_stateless(dtypes: &[DTypeKind]) -> PyResult<DTypeKind> {
             continue;
         }
 
-        if (candidate.max_value() as u128) >= unsigned_max {
+        if candidate.max_value().cast_unsigned() >= unsigned_max {
             return Ok(candidate);
         }
     }
@@ -267,6 +293,7 @@ pub(crate) fn promote_stateless(dtypes: &[DTypeKind]) -> PyResult<DTypeKind> {
     ))
 }
 
+/// Append one integer value to `buf` in native-endian representation.
 pub(crate) fn push_value_bytes(buf: &mut Vec<u8>, value: i128, dtype: DTypeKind) -> PyResult<()> {
     if !dtype.contains(value) {
         return Err(PyValueError::new_err(format!(
@@ -274,70 +301,63 @@ pub(crate) fn push_value_bytes(buf: &mut Vec<u8>, value: i128, dtype: DTypeKind)
         )));
     }
 
+    macro_rules! push_typed {
+        ($target:ty, $message:literal) => {{
+            let converted =
+                <$target>::try_from(value).map_err(|_| PyValueError::new_err($message))?;
+            buf.extend_from_slice(&converted.to_ne_bytes());
+        }};
+    }
+
     match dtype {
-        DTypeKind::I8 => buf.extend_from_slice(
-            &i8::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed i8 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::I16 => buf.extend_from_slice(
-            &i16::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed i16 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::I32 => buf.extend_from_slice(
-            &i32::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed i32 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::I64 => buf.extend_from_slice(
-            &i64::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed i64 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::U8 => buf.extend_from_slice(
-            &u8::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed u8 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::U16 => buf.extend_from_slice(
-            &u16::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed u16 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::U32 => buf.extend_from_slice(
-            &u32::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed u32 conversion"))?
-                .to_ne_bytes(),
-        ),
-        DTypeKind::U64 => buf.extend_from_slice(
-            &u64::try_from(value)
-                .map_err(|_| PyValueError::new_err("failed u64 conversion"))?
-                .to_ne_bytes(),
-        ),
+        DTypeKind::I8 => push_typed!(i8, "failed i8 conversion"),
+        DTypeKind::I16 => push_typed!(i16, "failed i16 conversion"),
+        DTypeKind::I32 => push_typed!(i32, "failed i32 conversion"),
+        DTypeKind::I64 => push_typed!(i64, "failed i64 conversion"),
+        DTypeKind::U8 => push_typed!(u8, "failed u8 conversion"),
+        DTypeKind::U16 => push_typed!(u16, "failed u16 conversion"),
+        DTypeKind::U32 => push_typed!(u32, "failed u32 conversion"),
+        DTypeKind::U64 => push_typed!(u64, "failed u64 conversion"),
     }
 
     Ok(())
 }
 
+/// Decode one native-endian integer value from `bytes`.
 pub(crate) fn decode_value(bytes: &[u8], dtype: DTypeKind) -> i128 {
-    match dtype {
-        DTypeKind::I8 => bytes[0] as i8 as i128,
-        DTypeKind::I16 => i16::from_ne_bytes(bytes.try_into().expect("i16")) as i128,
-        DTypeKind::I32 => i32::from_ne_bytes(bytes.try_into().expect("i32")) as i128,
-        DTypeKind::I64 => i64::from_ne_bytes(bytes.try_into().expect("i64")) as i128,
-        DTypeKind::U8 => bytes[0] as i128,
-        DTypeKind::U16 => u16::from_ne_bytes(bytes.try_into().expect("u16")) as i128,
-        DTypeKind::U32 => u32::from_ne_bytes(bytes.try_into().expect("u32")) as i128,
-        DTypeKind::U64 => u64::from_ne_bytes(bytes.try_into().expect("u64")) as i128,
+    macro_rules! decode_typed {
+        ($target:ty, $label:literal) => {{
+            let array: [u8; std::mem::size_of::<$target>()] = bytes.try_into().expect($label);
+            <$target>::from_ne_bytes(array)
+        }};
     }
+
+    match dtype {
+        DTypeKind::I8 => i128::from(i8::from_ne_bytes([bytes[0]])),
+        DTypeKind::I16 => i128::from(decode_typed!(i16, "i16")),
+        DTypeKind::I32 => i128::from(decode_typed!(i32, "i32")),
+        DTypeKind::I64 => i128::from(decode_typed!(i64, "i64")),
+        DTypeKind::U8 => i128::from(u8::from_ne_bytes([bytes[0]])),
+        DTypeKind::U16 => i128::from(decode_typed!(u16, "u16")),
+        DTypeKind::U32 => i128::from(decode_typed!(u32, "u32")),
+        DTypeKind::U64 => i128::from(decode_typed!(u64, "u64")),
+    }
+}
+
+/// Convert an itemsize in bytes to bit-width.
+fn itemsize_to_bits(itemsize: usize) -> Option<u8> {
+    let bytes = u8::try_from(itemsize).ok()?;
+    bytes.checked_mul(8)
 }
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for dtype parsing and promotion helpers.
+
     use super::*;
     use arrow_schema::DataType;
 
+    /// Confirm the signed/unsigned promotion rules used in stateless mode.
     #[test]
     fn promotion_rules() {
         assert_eq!(
@@ -355,6 +375,7 @@ mod tests {
         assert!(promote_stateless(&[DTypeKind::I8, DTypeKind::U64]).is_err());
     }
 
+    /// Confirm known dtype aliases map to the expected variants.
     #[test]
     fn parse_dtype_aliases() {
         assert_eq!(DTypeKind::from_name_or_code("int32"), Some(DTypeKind::I32));
@@ -366,6 +387,7 @@ mod tests {
         );
     }
 
+    /// Confirm all supported Arrow integer dtypes are accepted.
     #[test]
     fn parse_arrow_integer_dtypes() {
         assert_eq!(parse_arrow_dtype(&DataType::Int8).unwrap(), DTypeKind::I8);
@@ -387,6 +409,7 @@ mod tests {
         );
     }
 
+    /// Confirm unsupported Arrow dtypes are rejected.
     #[test]
     fn parse_arrow_dtype_rejects_unsupported() {
         assert!(parse_arrow_dtype(&DataType::Float32).is_err());

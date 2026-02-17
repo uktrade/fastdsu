@@ -361,9 +361,9 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
 
     runtime_memory_df = pd.concat(
         [
-            df.assign(metric="Runtime (seconds)", value=df["seconds"]),
+            df.assign(metric="Runtime", value=df["seconds"]),
             df.assign(
-                metric="Peak memory (MiB)",
+                metric="Peak memory",
                 value=df["peak_memory_bytes"] / (1024 * 1024),
             ),
         ],
@@ -385,9 +385,24 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
     memory_ax = axes[0, 1]
     install_ax = axes[1, 0]
     import_ax = axes[1, 1]
-    metric_order = ["Runtime (seconds)", "Peak memory (MiB)"]
+    metric_order = ["Runtime", "Peak memory"]
     scale_order = ["low", "medium", "high"]
     hue_order = ["fastdsu", "scipy", "networkx", "python_dsu"]
+    backend_palette = dict(
+        zip(hue_order, sns.color_palette(n_colors=len(hue_order)), strict=True)
+    )
+    scale_meta = (
+        df[["scale", "num_nodes", "num_edges"]]
+        .drop_duplicates(subset=["scale"])
+        .set_index("scale")
+    )
+    scale_tick_labels = [
+        f"{int(scale_meta.loc[scale, 'num_nodes']):,} nodes\n"
+        f"{int(scale_meta.loc[scale, 'num_edges']):,} edges"
+        for scale in scale_order
+    ]
+    install_order = install_df.sort_values("value")["backend"].tolist()
+    import_order = import_df.sort_values("value")["backend"].tolist()
 
     for ax, metric in zip((runtime_ax, memory_ax), metric_order, strict=True):
         panel = runtime_memory_df[runtime_memory_df["metric"] == metric]
@@ -398,54 +413,53 @@ def plot_results(df: pd.DataFrame, out_path: Path) -> None:
             hue="backend",
             order=scale_order,
             hue_order=hue_order,
+            palette=backend_palette,
             ax=ax,
         )
 
-        if metric == "Runtime (seconds)":
+        if metric == "Runtime":
             ax.set_yscale("log")
-            y_text = panel["value"].max() * 1.08
-            ax.set_ylabel("Runtime (seconds, log scale)")
+            ax.set_ylabel("seconds")
         else:
-            y_text = panel["value"].max() * 1.02
-            ax.set_ylabel("Peak memory (MiB)")
+            ax.set_yscale("log")
+            ax.set_ylabel("MiB")
 
         ax.set_title(metric)
-        ax.set_xlabel("Scale")
-
-        for _, row in panel.drop_duplicates(subset=["scale"]).iterrows():
-            ax.text(
-                x=scale_order.index(row["scale"]),
-                y=y_text,
-                s=f"{int(row['num_nodes']):,} nodes\n{int(row['num_edges']):,} edges",
-                ha="center",
-                va="bottom",
-                fontsize=10,
-            )
+        ax.set_xlabel("")
+        ax.set_xticks(range(len(scale_order)), labels=scale_tick_labels)
 
     sns.barplot(
         data=install_df,
         x="backend",
         y="value",
-        order=hue_order,
-        hue=None,
+        order=install_order,
+        hue="backend",
+        hue_order=install_order,
+        palette=backend_palette,
+        dodge=False,
+        legend=False,
         ax=install_ax,
     )
-    install_ax.set_title("Extra install size (MiB)")
-    install_ax.set_xlabel("Backend")
-    install_ax.set_ylabel(f"Extra size vs {INSTALL_SIZE_BASELINE_BACKEND} (MiB)")
+    install_ax.set_title(f"Extra install size vs {INSTALL_SIZE_BASELINE_BACKEND}")
+    install_ax.set_xlabel("")
+    install_ax.set_ylabel("MiB")
     install_ax.tick_params(axis="x", rotation=20)
 
     sns.barplot(
         data=import_df,
         x="backend",
         y="value",
-        order=hue_order,
-        hue=None,
+        order=import_order,
+        hue="backend",
+        hue_order=import_order,
+        palette=backend_palette,
+        dodge=False,
+        legend=False,
         ax=import_ax,
     )
-    import_ax.set_title("Extra import time (ms)")
-    import_ax.set_xlabel("Backend")
-    import_ax.set_ylabel(f"Extra import time vs {IMPORT_TIME_BASELINE_BACKEND} (ms)")
+    import_ax.set_title(f"Extra import time vs {IMPORT_TIME_BASELINE_BACKEND}")
+    import_ax.set_xlabel("")
+    import_ax.set_ylabel("ms")
     import_ax.tick_params(axis="x", rotation=20)
 
     fig.suptitle("Connected components: fastdsu vs alternatives", y=0.99)

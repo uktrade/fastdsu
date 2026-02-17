@@ -118,12 +118,33 @@ def test_dtype_resolution_accepts_enum_str_any() -> None:
     DSU(num_nodes=3, dtype=_DTypeLike())
 
 
+def test_constructor_guard_matrix() -> None:
+    """Constructor guard checks should reject invalid argument combinations."""
+    with pytest.raises(ValueError, match="pass either num_nodes or nodes, not both"):
+        DSU(num_nodes=3, nodes=array("I", [0, 1, 2]), dtype="uint32")
+
+    with pytest.raises(ValueError, match="one of num_nodes or nodes must be provided"):
+        DSU()
+
+    with pytest.raises(
+        ValueError,
+        match="dtype is required when constructing dense DSU via num_nodes",
+    ):
+        DSU(num_nodes=3)
+
+
 def test_explicit_dtype_is_strict() -> None:
     """Explicit dtype mode should reject mismatched input buffers."""
     dsu = DSU(num_nodes=4, dtype="uint32")
 
     with pytest.raises(ValueError, match="dtype"):
         dsu.union(array("I", [0]), array("q", [1]))
+
+
+def test_dense_stateless_inference_rejects_negative_nodes() -> None:
+    """Dense stateless mode should reject negative node IDs when inferring size."""
+    with pytest.raises(ValueError, match="dense mode requires non-negative node ids"):
+        connected_components(array("i", [0, -1]), array("i", [1, 2]))
 
 
 def test_stateless_promotion_signed_unsigned() -> None:
@@ -222,6 +243,25 @@ def test_dsu_union_accepts_arrow_array_and_stream() -> None:
         pa.chunked_array([[1, 2], [4, 5]], type=pa.uint32()),
     )
     assert dsu.connected(3, 5)
+
+
+def test_unknown_node_errors_dense_and_sparse() -> None:
+    """Stateful operations should report unknown node IDs clearly."""
+    dense = DSU(num_nodes=3, dtype=DType.uint32)
+    with pytest.raises(ValueError, match="unknown node id: 3"):
+        dense.find(3)
+    with pytest.raises(ValueError, match="unknown node id: -1"):
+        dense.connected(-1, 0)
+    with pytest.raises(ValueError, match="unknown node id: 3"):
+        dense.union(array("I", [0, 3]), array("I", [1, 2]))
+
+    sparse = DSU(nodes=array("q", [10, 25, 47]))
+    with pytest.raises(ValueError, match="unknown node id: 99"):
+        sparse.find(99)
+    with pytest.raises(ValueError, match="unknown node id: 99"):
+        sparse.connected(99, 10)
+    with pytest.raises(ValueError, match="unknown node id: 99"):
+        sparse.union(array("q", [10, 99]), array("q", [25, 47]))
 
 
 def test_buffer_validation_failure_falls_through_to_arrow_array() -> None:
