@@ -20,6 +20,8 @@ Other implementations can require building large objects unrelated to the core o
 
 This is a highly performant disjoint set implementation made for production use cases.
 
+![Comparison of approaches](demos/comparison.png)
+
 ## Usage
 
 ### Stateless
