@@ -211,7 +211,7 @@ def run_networkx(data: Inputs) -> pl.Series:
 
     graph = nx.Graph()
     graph.add_nodes_from(range(data.scale.num_nodes))
-    graph.add_edges_from(zip(src_np.tolist(), dst_np.tolist(), strict=True))
+    graph.add_edges_from(zip(src_np, dst_np, strict=True))
 
     labels = np.empty(data.scale.num_nodes, dtype=np.int64)
     for component_id, nodes in enumerate(nx.connected_components(graph)):
@@ -277,10 +277,14 @@ def benchmark(
 def peak_memory_bytes(
     func: Callable[..., object], *args: object, **kwargs: object
 ) -> int:
-    """Measure peak memory use (bytes) for one call via memray."""
+    """Measure peak memory use (bytes) for one call via memray.
+
+    `trace_python_allocators=True` is enabled so pure-Python allocators are
+    counted, making backend comparisons more realistic.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "memray-trace.bin"
-        with memray.Tracker(str(path)):
+        with memray.Tracker(str(path), trace_python_allocators=True):
             func(*args, **kwargs)
         reader = memray.FileReader(str(path))
         return int(reader.metadata.peak_memory)

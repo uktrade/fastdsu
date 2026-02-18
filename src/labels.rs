@@ -6,12 +6,12 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::Field;
-use pyo3::exceptions::{PyBufferError, PyValueError};
+use pyo3::exceptions::PyBufferError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyTuple};
 use pyo3_arrow::ffi::to_array_pycapsules;
-use std::ffi::{CString, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::Arc;
 
 /// Packed connected-component labels.
@@ -25,13 +25,81 @@ pub(crate) struct Labels {
     dtype: DTypeKind,
 }
 
-/// Buffer-protocol metadata allocated when shape/strides are requested.
+/// Buffer-protocol metadata allocated per exported `Py_buffer`.
 #[repr(C)]
-struct LabelsBufferMeta {
+struct BufferMeta {
+    /// Buffer format code plus trailing null byte.
+    format: [u8; 2],
     /// One-dimensional shape.
     shape: isize,
     /// One-dimensional byte stride.
     strides: isize,
+}
+
+/// Helper for writing `Py_buffer` fields after validation has completed.
+struct ViewBuilder(*mut ffi::Py_buffer);
+
+impl ViewBuilder {
+    /// Create a builder over a non-null, zero-initialized `Py_buffer`.
+    ///
+    /// # Safety
+    ///
+    /// `view` must be non-null and point to a zero-initialized `Py_buffer`.
+    unsafe fn new(view: *mut ffi::Py_buffer) -> Self {
+        Self(view)
+    }
+
+    /// Set the exported owner object.
+    fn set_obj(&mut self, obj: *mut ffi::PyObject) {
+        self.raw_mut().obj = obj;
+    }
+
+    /// Set raw data pointer and total byte length.
+    fn set_data(&mut self, ptr: *mut c_void, len: isize) {
+        let view = self.raw_mut();
+        view.buf = ptr;
+        view.len = len;
+    }
+
+    /// Set item metadata (readonly + itemsize).
+    fn set_item(&mut self, itemsize: isize, readonly: bool) {
+        let view = self.raw_mut();
+        view.readonly = if readonly { 1 } else { 0 };
+        view.itemsize = itemsize;
+    }
+
+    /// Set format/shape/strides pointers and attach metadata ownership.
+    fn set_meta(&mut self, meta: *mut BufferMeta, flags: c_int) {
+        // SAFETY: `meta` was allocated by `Box::into_raw` in `__getbuffer__` and lives until
+        // `__releasebuffer__`.
+        let meta_ref = unsafe { &mut *meta };
+        let view = self.raw_mut();
+
+        view.ndim = 1;
+        view.format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+            meta_ref.format.as_mut_ptr().cast::<c_char>()
+        } else {
+            std::ptr::null_mut()
+        };
+        view.shape = if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND {
+            &raw mut meta_ref.shape
+        } else {
+            std::ptr::null_mut()
+        };
+        view.strides = if (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES {
+            &raw mut meta_ref.strides
+        } else {
+            std::ptr::null_mut()
+        };
+        view.suboffsets = std::ptr::null_mut();
+        view.internal = meta.cast::<c_void>();
+    }
+
+    /// Return a mutable view reference.
+    fn raw_mut(&mut self) -> &mut ffi::Py_buffer {
+        // SAFETY: `ViewBuilder` is only constructed from non-null pointers in `__getbuffer__`.
+        unsafe { &mut *self.0 }
+    }
 }
 
 impl Labels {
@@ -118,6 +186,9 @@ impl Labels {
             return Err(PyBufferError::new_err("Labels is read-only"));
         }
 
+        // SAFETY: `view` was checked non-null above.
+        unsafe { std::ptr::write(view, std::mem::zeroed()) };
+
         let borrowed = slf.borrow();
         let ptr = borrowed.data.as_ptr();
         let len = borrowed.data.len();
@@ -130,48 +201,18 @@ impl Labels {
         let len_isize =
             isize::try_from(len).map_err(|_| PyBufferError::new_err("buffer length is invalid"))?;
 
-        let mut meta_ptr: *mut LabelsBufferMeta = std::ptr::null_mut();
-        if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND
-            || (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES
-        {
-            meta_ptr = Box::into_raw(Box::new(LabelsBufferMeta {
-                shape: item_count,
-                strides: itemsize,
-            }));
-        }
+        let meta = Box::into_raw(Box::new(BufferMeta {
+            format: [format_code, 0],
+            shape: item_count,
+            strides: itemsize,
+        }));
 
-        // SAFETY: `view` is validated non-null above; all assigned pointers are either null,
-        // stable pointers owned by `slf` for the exported lifetime, or heap allocations tracked
-        // through `view.internal` and freed in `__releasebuffer__`.
-        unsafe {
-            (*view).obj = slf.into_ptr();
-            (*view).buf = ptr.cast_mut().cast::<c_void>();
-            (*view).len = len_isize;
-            (*view).readonly = 1;
-            (*view).itemsize = itemsize;
-
-            (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
-                CString::new(vec![format_code])
-                    .map_err(|_| PyValueError::new_err("invalid format code"))?
-                    .into_raw()
-            } else {
-                std::ptr::null_mut()
-            };
-
-            (*view).ndim = 1;
-            (*view).shape = if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND {
-                &raw mut (*meta_ptr).shape
-            } else {
-                std::ptr::null_mut()
-            };
-            (*view).strides = if (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES {
-                &raw mut (*meta_ptr).strides
-            } else {
-                std::ptr::null_mut()
-            };
-            (*view).suboffsets = std::ptr::null_mut();
-            (*view).internal = meta_ptr.cast::<c_void>();
-        }
+        // SAFETY: `view` was validated non-null and zero-initialized above.
+        let mut builder = unsafe { ViewBuilder::new(view) };
+        builder.set_obj(slf.into_ptr());
+        builder.set_data(ptr.cast_mut().cast::<c_void>(), len_isize);
+        builder.set_item(itemsize, true);
+        builder.set_meta(meta, flags);
 
         Ok(())
     }
@@ -183,16 +224,15 @@ impl Labels {
         }
 
         // SAFETY: all pointers inspected here were produced by `__getbuffer__` for this same
-        // `Py_buffer` instance; each allocation is consumed at most once and then nulled out.
+        // `Py_buffer` instance; metadata is consumed at most once and then nulled out.
         unsafe {
-            if !(*view).format.is_null() {
-                drop(CString::from_raw((*view).format));
-                (*view).format = std::ptr::null_mut();
-            }
             if !(*view).internal.is_null() {
-                drop(Box::from_raw((*view).internal.cast::<LabelsBufferMeta>()));
+                drop(Box::from_raw((*view).internal.cast::<BufferMeta>()));
                 (*view).internal = std::ptr::null_mut();
             }
+            (*view).format = std::ptr::null_mut();
+            (*view).shape = std::ptr::null_mut();
+            (*view).strides = std::ptr::null_mut();
         }
     }
 }

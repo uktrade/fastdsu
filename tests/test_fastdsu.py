@@ -179,6 +179,17 @@ def test_labels_buffer_protocol() -> None:
     assert view.tolist() == [0, 0, 2, 2]
 
 
+def test_labels_buffer_protocol_stress_repeated_memoryview_release() -> None:
+    """Repeated memoryview exports should remain stable and releasable."""
+    labels = connected_components(array("I", [0, 2]), array("I", [1, 3]), num_nodes=4)
+
+    for _ in range(2_000):
+        view = memoryview(cast(Any, labels))
+        assert view.readonly
+        assert view.format == "I"
+        view.release()
+
+
 def test_labels_arrow_c_array_export() -> None:
     """`Labels` should export as a single Arrow C array."""
     labels = connected_components(array("I", [0, 2]), array("I", [1, 3]), num_nodes=4)
