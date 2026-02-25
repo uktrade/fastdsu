@@ -1,0 +1,33 @@
+repos:
+- repo: local
+  hooks:
+    # Run the Python and Rust linter and formatter using just command
+    - id: format
+      name: format
+      description: "Format Python and Rust code via just command"
+      entry: just format
+      language: system
+      types_or: [python, pyi]
+      pass_filenames: false
+      stages: [pre-commit]
+
+    # Run the Python and Rust type checker using just command
+    - id: check
+      name: check
+      description: "Type check Python and Rust code via just command"
+      entry: just check
+      language: system
+      types_or: [python, pyi]
+      pass_filenames: false
+      stages: [pre-commit]
+
+# Mandatory internal hooks
+- repo: https://github.com/uktrade/github-standards
+  rev: v1.3.0  # update periodically with pre-commit autoupdate
+  hooks:
+    - id: run-security-scan
+      verbose: false
+    - id: run-personal-data-scan
+      verbose: false
+    - id: validate-security-scan
+      verbose: false

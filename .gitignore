@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 wheels/
+.pytest_cache
+.ruff_cache
 
 # Compiled extensions
 *.so

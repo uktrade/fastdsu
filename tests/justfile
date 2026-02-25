@@ -1,7 +1,7 @@
 set working-directory := ".."
 
 # Run all tests
-default: python rust
+default: rust python
 
 # Run only Python tests
 python *ARGS:
