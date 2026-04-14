@@ -8,6 +8,11 @@ name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+arrow-array = "58.1.0"
+arrow-buffer = "58.1.0"
+arrow-data = "58.1.0"
+arrow-schema = "58.1.0"
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
-# "abi3-py39" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.9
-pyo3 = { version = "0.27.1", features = ["extension-module", "abi3-py39"] }
+# "abi3-py311" tells pyo3 (and maturin) to build using the stable ABI with minimum Python version 3.11
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py311"] }
+pyo3-arrow = "0.17.0"

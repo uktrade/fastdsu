@@ -1,3 +1,6 @@
+# Custom
+scratch/
+
 # Python
 __pycache__/
 *.py[oc]

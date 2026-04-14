@@ -1,35 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Generic, TypeVar
+import sys
+from typing import TYPE_CHECKING, Protocol, TypeAlias
 
-InputLike = Iterable[int]
+if sys.version_info >= (3, 13):
+    from types import CapsuleType as PyCapsule
+elif TYPE_CHECKING:
+    class PyCapsule: ...
 
-T = TypeVar("T", bound=int)
+class SupportsArrowArray(Protocol):
+    def __arrow_c_array__(
+        self, requested_schema: PyCapsule | None = None
+    ) -> tuple[PyCapsule, PyCapsule]: ...
 
-class Labels(Generic[T]):
-    def __len__(self) -> int: ...
-    def to_list(self) -> list[T]: ...
+Edgelist: TypeAlias = SupportsArrowArray
+Labels: TypeAlias = SupportsArrowArray
 
-class DSU(Generic[T]):
-    def __init__(
-        self,
-        num_nodes: int | None = None,
-        nodes: InputLike | None = None,
-        dtype: object | str | None = None,
-    ) -> None: ...
-    def union(self, src: InputLike, dst: InputLike) -> None: ...
-    def find(self, node: int) -> int: ...
-    def connected(self, a: int, b: int) -> bool: ...
-    def labels(self) -> Labels[T]: ...
-    def components(self) -> frozenset[frozenset[int]]: ...
-    def reset(self) -> None: ...
-
-def connected_components(
-    src: InputLike,
-    dst: InputLike,
-    *,
-    num_nodes: int | None = None,
-    nodes: InputLike | None = None,
-    dtype: object | str | None = None,
-) -> Labels[int]: ...
+class DSU:
+    def __init__(self) -> None: ...
+    def union(self, src: Edgelist, dst: Edgelist) -> None: ...
+    def labels(self) -> Labels: ...

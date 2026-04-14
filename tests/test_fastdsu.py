@@ -2,120 +2,77 @@
 
 from __future__ import annotations
 
+import polars as pl
+import pyarrow as pa
 import pytest
-from fastdsu import DSU, connected_components
+from fastdsu import DSU
 
 
-def test_connected_components_dense_stateless() -> None:
-    """Stateless dense connected components should return stable labels."""
-    labels = connected_components([0, 1, 3, 4], [1, 2, 4, 5], num_nodes=6)
-
-    assert labels == [0, 0, 0, 3, 3, 3]
-
-
-def test_connected_components_dense_inferred() -> None:
-    """Stateless dense mode should infer node count from edge maxima."""
-    labels = connected_components([0, 1, 3, 4], [1, 2, 4, 5])
-
-    assert labels == [0, 0, 0, 3, 3, 3]
+def src_dst(*pairs: tuple[int, int]) -> tuple[pa.Array, pa.Array]:
+    """Build a pair of uint32 Arrow arrays from (src, dst) integer pairs."""
+    src, dst = zip(*pairs, strict=True)
+    return pa.array(src, type=pa.uint32()), pa.array(dst, type=pa.uint32())
 
 
-def test_dense_dsu_union_find_connected_reset() -> None:
-    """Stateful dense DSU operations should match expected behaviour."""
-    dsu = DSU(num_nodes=6)
-
-    dsu.union([0, 1, 3, 4], [1, 2, 4, 5])
-
-    assert dsu.connected(0, 2)
-    assert dsu.connected(3, 5)
-    assert not dsu.connected(0, 3)
-    assert dsu.find(2) == 0
-
-    dsu.reset()
-
-    assert not dsu.connected(0, 2)
-    assert dsu.find(2) == 2
+def test_empty_labels() -> None:
+    """A freshly constructed DSU with no edges produces an empty label array."""
+    dsu = DSU()
+    assert len(pa.array(dsu.labels())) == 0
 
 
-def test_sparse_mode_stateless_and_stateful() -> None:
-    """Sparse mode should preserve original IDs in outputs and queries."""
-    nodes = [10, 25, 47, 99, 130, 200, 25]
-    src = [10, 25, 130]
-    dst = [25, 47, 200]
-
-    labels = connected_components(src, dst, nodes=nodes)
-    assert labels == [10, 10, 10, 99, 130, 130]
-
-    dsu = DSU(nodes=nodes)
-    dsu.union(src, dst)
-
-    assert dsu.find(47) == 10
-    assert dsu.find(200) == 130
-    assert dsu.connected(10, 47)
-    assert not dsu.connected(10, 99)
-
-    assert dsu.components() == frozenset(
-        {frozenset({10, 25, 47}), frozenset({99}), frozenset({130, 200})}
-    )
+def test_union_merges_components() -> None:
+    """Nodes connected by edges appear in the same component."""
+    dsu = DSU()
+    dsu.union(*src_dst((0, 1), (1, 2)))
+    labels = pa.array(dsu.labels())
+    assert labels[0] == labels[1] == labels[2]
 
 
-def test_constructor_guard_matrix() -> None:
-    """Constructor guard checks should reject invalid argument combinations."""
-    with pytest.raises(ValueError, match="pass either num_nodes or nodes, not both"):
-        DSU(num_nodes=3, nodes=[0, 1, 2])
+def test_disjoint_components_stay_separate() -> None:
+    """Nodes with no path between them remain in distinct components."""
+    dsu = DSU()
+    dsu.union(*src_dst((0, 1), (2, 3)))
+    labels = pa.array(dsu.labels())
+    assert labels[0] == labels[1]
+    assert labels[2] == labels[3]
+    assert labels[0] != labels[2]
 
-    with pytest.raises(ValueError, match="one of num_nodes or nodes must be provided"):
-        DSU()
+
+def test_union_is_transitive() -> None:
+    """Components merged across separate union calls are still connected."""
+    dsu = DSU()
+    dsu.union(*src_dst((0, 1)))
+    dsu.union(*src_dst((1, 2)))
+    labels = pa.array(dsu.labels())
+    assert labels[0] == labels[1] == labels[2]
 
 
-def test_union_length_mismatch() -> None:
-    """Mismatched src and dst lengths should raise immediately."""
-    dsu = DSU(num_nodes=4)
+def test_polars_arrays_accepted() -> None:
+    """Arrays exported from a Polars DataFrame are accepted as input."""
+    df = pl.DataFrame({"src": [0, 1], "dst": [1, 2]}).cast(pl.UInt32)
+    dsu = DSU()
+    dsu.union(df["src"].to_arrow(), df["dst"].to_arrow())
+    labels = pl.Series(dsu.labels())
+    assert labels[0] == labels[1] == labels[2]
 
+
+def test_labels_consumable_by_polars() -> None:
+    """The labels return value can be consumed directly by Polars as uint32."""
+    dsu = DSU()
+    dsu.union(*src_dst((0, 1)))
+    series = pl.Series(dsu.labels())
+    assert series.dtype == pl.UInt32
+
+
+def test_length_mismatch_raises() -> None:
+    """A ValueError is raised when src and dst arrays have different lengths."""
+    dsu = DSU()
     with pytest.raises(ValueError, match="length"):
-        dsu.union([0, 1], [1])
+        dsu.union(pa.array([0], type=pa.uint32()), pa.array([1, 2], type=pa.uint32()))
 
 
-def test_dense_stateless_inference_rejects_negative_nodes() -> None:
-    """Negative node IDs should be rejected as unknown in dense mode."""
-    with pytest.raises(ValueError, match="unknown node id: -1"):
-        connected_components([0, -1], [1, 2])
-
-
-def test_unknown_node_errors_dense_and_sparse() -> None:
-    """Stateful operations should report unknown node IDs clearly."""
-    dense = DSU(num_nodes=3)
-
-    with pytest.raises(ValueError, match="unknown node id: 3"):
-        dense.find(3)
-
-    with pytest.raises(ValueError, match="unknown node id: 3"):
-        dense.union([0, 3], [1, 2])
-
-    sparse = DSU(nodes=[10, 25, 47])
-
-    with pytest.raises(ValueError, match="unknown node id: 99"):
-        sparse.find(99)
-
-    with pytest.raises(ValueError, match="unknown node id: 99"):
-        sparse.union([10, 99], [25, 47])
-
-
-def test_labels_returns_list() -> None:
-    """DSU labels should return a plain list of integers."""
-    dsu = DSU(num_nodes=4)
-    dsu.union([0, 2], [1, 3])
-
-    result = dsu.labels()
-
-    assert isinstance(result, list)
-    assert result == [0, 0, 2, 2]
-
-
-def test_sparse_deduplication() -> None:
-    """Duplicate node IDs in sparse constructor should be silently deduplicated."""
-    dsu = DSU(nodes=[1, 2, 2, 3])
-
-    assert dsu.find(2) == 2
-    with pytest.raises(ValueError, match="unknown node id"):
-        dsu.find(99)
+def test_wrong_dtype_raises() -> None:
+    """A ValueError is raised when arrays have a dtype other than uint32."""
+    dsu = DSU()
+    with pytest.raises(ValueError):
+        dsu.union(pa.array([0, 1], type=pa.int64()), pa.array([1, 2], type=pa.int64()))

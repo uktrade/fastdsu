@@ -1,22 +1,19 @@
-//! Core disjoint-set implementation over dense indices.
-
-use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
 
 /// Errors produced by the DSU core.
 #[derive(Debug, PartialEq)]
 pub enum CoreError {
-    /// A node ID was not found in the node space.
-    UnknownNode(i64),
-    /// Two edge buffers had differing lengths.
+    /// The src and dst edge buffers had differing lengths.
     LengthMismatch { src: usize, dst: usize },
 }
 
 impl fmt::Display for CoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownNode(id) => write!(f, "unknown node id: {id}"),
             Self::LengthMismatch { src, dst } => {
                 write!(f, "src length {src} does not match dst length {dst}")
             }
@@ -24,255 +21,186 @@ impl fmt::Display for CoreError {
     }
 }
 
-/// Mapping between external node identifiers and internal dense indices.
-#[derive(Debug)]
-enum NodeSpace {
-    /// Dense node space `0..num_nodes`.
-    Dense {
-        /// Number of nodes in the dense space.
-        num_nodes: usize,
-    },
-    /// Sparse node space defined by explicit node IDs.
-    Sparse {
-        /// External node ID by dense index.
-        unique_nodes: Vec<i64>,
-        /// Dense index by external node ID.
-        index: HashMap<i64, usize>,
-    },
+impl std::error::Error for CoreError {}
+
+// ---------------------------------------------------------------------------
+// NodeIndex trait
+// ---------------------------------------------------------------------------
+
+/// A primitive integer type that can serve as a node index.
+pub trait NodeIndex: Copy + Eq {
+    fn from_usize(n: usize) -> Self;
+    fn as_usize(self) -> usize;
 }
 
-/// Union-find storage and node-space mapping.
-#[derive(Debug)]
-pub struct DsuCore {
-    /// Parent pointer per dense node.
-    parent: Vec<usize>,
-    /// Rank per dense node.
+macro_rules! impl_node_index {
+    ($($t:ty),*) => {
+        $(impl NodeIndex for $t {
+            #[inline] fn from_usize(n: usize) -> Self { n as Self }
+            #[inline] fn as_usize(self) -> usize { self as usize }
+        })*
+    };
+}
+
+impl_node_index!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
+// ---------------------------------------------------------------------------
+// DsuCore
+// ---------------------------------------------------------------------------
+
+/// Disjoint set union over a dense integer node space `0..len`.
+///
+/// Uses recursive path compression and union by rank.
+pub struct DsuCore<T> {
+    parent: Vec<T>,
     rank: Vec<u8>,
-    /// External-to-dense node mapping strategy.
-    space: NodeSpace,
 }
 
-impl DsuCore {
-    /// Construct a dense DSU over nodes `0..num_nodes`.
-    pub fn new_dense(num_nodes: usize) -> Self {
-        Self::with_space(NodeSpace::Dense { num_nodes }, num_nodes)
-    }
-
-    /// Construct a sparse DSU from an explicit node list, deduplicating in order.
-    pub fn new_sparse(nodes: Vec<i64>) -> Self {
-        let mut index = HashMap::with_capacity(nodes.len());
-        let mut unique_nodes = Vec::with_capacity(nodes.len());
-
-        for node in nodes {
-            if let Entry::Occupied(_) = index.entry(node) {
-                continue;
-            }
-            let dense_index = unique_nodes.len();
-            unique_nodes.push(node);
-            index.insert(node, dense_index);
+impl<T: NodeIndex> DsuCore<T> {
+    /// Allocate a DSU for `num_nodes` nodes, each initially its own component.
+    pub fn new(num_nodes: usize) -> Self {
+        Self {
+            parent: (0..num_nodes).map(T::from_usize).collect(),
+            rank: vec![0; num_nodes],
         }
-
-        let node_count = unique_nodes.len();
-        Self::with_space(
-            NodeSpace::Sparse {
-                unique_nodes,
-                index,
-            },
-            node_count,
-        )
     }
 
-    /// Return the number of nodes tracked by this DSU.
-    pub fn node_count(&self) -> usize {
+    /// The number of allocated nodes.
+    pub fn len(&self) -> usize {
         self.parent.len()
     }
 
-    /// Build a DSU with identity parents and zero ranks.
-    fn with_space(space: NodeSpace, node_count: usize) -> Self {
-        Self {
-            parent: (0..node_count).collect(),
-            rank: vec![0; node_count],
-            space,
-        }
+    /// Grow the node space to `new_len`, adding singleton nodes as needed.
+    pub fn grow(&mut self, new_len: usize) {
+        let old_len = self.parent.len();
+        self.parent.extend((old_len..new_len).map(T::from_usize));
+        self.rank.resize(new_len, 0);
     }
 
-    /// Resolve an external node ID to a dense index.
-    fn index_of_external(&self, node: i64) -> Option<usize> {
-        match &self.space {
-            NodeSpace::Dense { num_nodes } => {
-                let as_usize = usize::try_from(node).ok()?;
-                (as_usize < *num_nodes).then_some(as_usize)
-            }
-            NodeSpace::Sparse { index, .. } => index.get(&node).copied(),
+    /// Union all edges from the `src` and `dst` slices.
+    ///
+    /// Caller must ensure all IDs are within `0..len` before calling.
+    pub fn union_edges(&mut self, src: &[T], dst: &[T]) -> Result<(), CoreError> {
+        if src.len() != dst.len() {
+            return Err(CoreError::LengthMismatch {
+                src: src.len(),
+                dst: dst.len(),
+            });
         }
-    }
-
-    /// Resolve a dense index to its external node ID.
-    fn external_of_index(&self, index: usize) -> i64 {
-        match &self.space {
-            NodeSpace::Dense { .. } => index as i64,
-            NodeSpace::Sparse { unique_nodes, .. } => unique_nodes[index],
+        for (&s, &d) in src.iter().zip(dst.iter()) {
+            self.union_roots(s.as_usize(), d.as_usize());
         }
-    }
-
-    /// Resolve an external node ID or return `CoreError::UnknownNode`.
-    fn index_or_err(&self, node: i64) -> Result<usize, CoreError> {
-        self.index_of_external(node)
-            .ok_or(CoreError::UnknownNode(node))
-    }
-
-    /// Find the root dense index for `node`, applying path compression.
-    fn find_root(&mut self, node: usize) -> usize {
-        let mut root = node;
-        while self.parent[root] != root {
-            root = self.parent[root];
-        }
-
-        let mut current = node;
-        while self.parent[current] != current {
-            let next = self.parent[current];
-            self.parent[current] = root;
-            current = next;
-        }
-
-        root
-    }
-
-    /// Union two dense indices via rank heuristic.
-    fn union_indices(&mut self, left: usize, right: usize) {
-        let mut left_root = self.find_root(left);
-        let mut right_root = self.find_root(right);
-
-        if left_root == right_root {
-            return;
-        }
-
-        if self.rank[left_root] < self.rank[right_root] {
-            std::mem::swap(&mut left_root, &mut right_root);
-        }
-
-        let equal_rank = self.rank[left_root] == self.rank[right_root];
-        self.parent[right_root] = left_root;
-        if equal_rank {
-            self.rank[left_root] = self.rank[left_root].saturating_add(1);
-        }
-    }
-
-    /// Union two external node IDs.
-    pub fn union_external(&mut self, left: i64, right: i64) -> Result<(), CoreError> {
-        let left_index = self.index_or_err(left)?;
-        let right_index = self.index_or_err(right)?;
-        self.union_indices(left_index, right_index);
         Ok(())
     }
 
-    /// Return the current representative for an external node ID.
-    pub fn find_external(&mut self, node: i64) -> Result<i64, CoreError> {
-        let index = self.index_or_err(node)?;
-        let root = self.find_root(index);
-        Ok(self.external_of_index(root))
-    }
-
-    /// Return whether two external node IDs are in the same component.
-    pub fn connected_external(&mut self, left: i64, right: i64) -> Result<bool, CoreError> {
-        let left_index = self.index_or_err(left)?;
-        let right_index = self.index_or_err(right)?;
-        Ok(self.find_root(left_index) == self.find_root(right_index))
-    }
-
-    /// Materialise one representative per node in dense-order.
-    pub fn labels_values(&mut self) -> Vec<i64> {
-        (0..self.node_count())
-            .map(|idx| {
-                let root = self.find_root(idx);
-                self.external_of_index(root)
-            })
+    /// Return the root label for each node.
+    ///
+    /// Applies path compression across all nodes as a side effect.
+    pub fn labels(&mut self) -> Vec<T> {
+        (0..self.parent.len())
+            .map(|i| T::from_usize(self.find_root(i)))
             .collect()
     }
 
-    /// Materialise sorted components grouped by representative.
-    pub fn components_values(&mut self) -> Vec<Vec<i64>> {
-        let mut groups: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    // -----------------------------------------------------------------------
+    // Internals
+    // -----------------------------------------------------------------------
 
-        for idx in 0..self.node_count() {
-            let root = self.find_root(idx);
-            let representative = self.external_of_index(root);
-            groups
-                .entry(representative)
-                .or_default()
-                .push(self.external_of_index(idx));
+    fn find_root(&mut self, x: usize) -> usize {
+        if self.parent[x].as_usize() != x {
+            let root = self.find_root(self.parent[x].as_usize());
+            self.parent[x] = T::from_usize(root);
         }
-
-        let mut out: Vec<Vec<i64>> = groups.into_values().collect();
-        for group in &mut out {
-            group.sort_unstable();
-        }
-        out
+        self.parent[x].as_usize()
     }
 
-    /// Reset parent/rank arrays so each node is its own set.
-    pub fn reset(&mut self) {
-        for (idx, parent) in self.parent.iter_mut().enumerate() {
-            *parent = idx;
+    fn union_roots(&mut self, a: usize, b: usize) {
+        let ra = self.find_root(a);
+        let rb = self.find_root(b);
+        if ra == rb {
+            return;
         }
-        self.rank.fill(0);
+        match self.rank[ra].cmp(&self.rank[rb]) {
+            std::cmp::Ordering::Less => self.parent[ra] = T::from_usize(rb),
+            std::cmp::Ordering::Greater => self.parent[rb] = T::from_usize(ra),
+            std::cmp::Ordering::Equal => {
+                self.parent[rb] = T::from_usize(ra);
+                self.rank[ra] += 1;
+            }
+        }
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
-    //! Unit tests for DSU core behaviour.
-
     use super::*;
 
-    /// Confirm dense DSU operations and label extraction.
     #[test]
-    fn dense_union_find_and_labels() {
-        let mut dsu = DsuCore::new_dense(6);
-        dsu.union_external(0, 1).unwrap();
-        dsu.union_external(1, 2).unwrap();
-        dsu.union_external(4, 5).unwrap();
-
-        assert_eq!(dsu.find_external(2).unwrap(), 0);
-        assert_eq!(dsu.find_external(5).unwrap(), 4);
-        assert_eq!(dsu.labels_values(), vec![0, 0, 0, 3, 4, 4]);
+    fn new_nodes_are_own_roots() {
+        let mut dsu: DsuCore<u32> = DsuCore::new(5);
+        let labels = dsu.labels();
+        for (i, &label) in labels.iter().enumerate().take(5) {
+            assert_eq!(label as usize, i);
+        }
     }
 
-    /// Confirm sparse deduplication and deterministic component output.
     #[test]
-    fn sparse_dedup_and_components() {
-        let mut dsu = DsuCore::new_sparse(vec![10, 25, 47, 99, 130, 200, 25]);
-
-        dsu.union_external(10, 25).unwrap();
-        dsu.union_external(25, 47).unwrap();
-        dsu.union_external(130, 200).unwrap();
-
-        assert_eq!(dsu.node_count(), 6);
-        assert_eq!(dsu.find_external(47).unwrap(), 10);
-        assert_eq!(dsu.labels_values(), vec![10, 10, 10, 99, 130, 130]);
-        assert_eq!(
-            dsu.components_values(),
-            vec![vec![10, 25, 47], vec![99], vec![130, 200]]
-        );
+    fn grow_adds_singleton_nodes() {
+        let mut dsu: DsuCore<u32> = DsuCore::new(2);
+        dsu.grow(5);
+        assert_eq!(dsu.len(), 5);
+        let labels = dsu.labels();
+        for (i, &label) in labels.iter().enumerate() {
+            assert_eq!(label as usize, i);
+        }
     }
 
-    /// Confirm rank-tie behaviour remains deterministic.
     #[test]
-    fn equal_rank_tie_break_is_left_argument_root() {
-        let mut dsu = DsuCore::new_dense(4);
-        dsu.union_external(1, 2).unwrap();
-        dsu.union_external(3, 2).unwrap();
-
-        assert_eq!(dsu.find_external(1).unwrap(), 1);
-        assert_eq!(dsu.find_external(2).unwrap(), 1);
-        assert_eq!(dsu.find_external(3).unwrap(), 1);
+    fn union_edges_merges_components() {
+        let mut dsu: DsuCore<u32> = DsuCore::new(6);
+        let src = [0u32, 1, 3, 4];
+        let dst = [1u32, 2, 4, 5];
+        dsu.union_edges(&src, &dst).unwrap();
+        let labels = dsu.labels();
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[1], labels[2]);
+        assert_eq!(labels[3], labels[4]);
+        assert_eq!(labels[4], labels[5]);
+        assert_ne!(labels[0], labels[3]);
     }
 
-    /// Confirm unknown node IDs produce the correct error.
     #[test]
-    fn unknown_node_returns_error() {
-        let mut dsu = DsuCore::new_dense(3);
-        assert_eq!(dsu.find_external(99), Err(CoreError::UnknownNode(99)));
-        assert_eq!(dsu.union_external(0, 99), Err(CoreError::UnknownNode(99)));
+    fn labels_groups_components() {
+        let mut dsu: DsuCore<u32> = DsuCore::new(6);
+        let src = [0u32, 1, 3];
+        let dst = [1u32, 2, 4];
+        dsu.union_edges(&src, &dst).unwrap();
+        let labels = dsu.labels();
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[1], labels[2]);
+        assert_eq!(labels[3], labels[4]);
+        assert_ne!(labels[0], labels[3]);
+        assert_ne!(labels[0], labels[5]);
+    }
+
+    #[test]
+    fn length_mismatch_error() {
+        let mut dsu: DsuCore<u32> = DsuCore::new(4);
+        let result = dsu.union_edges(&[0u32, 1], &[1u32]);
+        assert_eq!(result, Err(CoreError::LengthMismatch { src: 2, dst: 1 }));
+    }
+
+    #[test]
+    fn works_with_u8_nodes() {
+        let mut dsu: DsuCore<u8> = DsuCore::new(4);
+        dsu.union_edges(&[0u8, 2], &[1u8, 3]).unwrap();
+        let labels = dsu.labels();
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[2], labels[3]);
+        assert_ne!(labels[0], labels[2]);
     }
 }

@@ -1,11 +1,9 @@
 """Public Python API for fastdsu."""
 
-from contextlib import suppress
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 
-from fastdsu._core import DSU, connected_components
+from fastdsu._core import DSU
 
-with suppress(PackageNotFoundError):
-    __version__ = version("fastdsu")
+__version__ = version("fastdsu")
 
-__all__ = ["DSU", "connected_components"]
+__all__ = ["DSU"]
