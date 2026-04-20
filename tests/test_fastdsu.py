@@ -74,5 +74,5 @@ def test_length_mismatch_raises() -> None:
 def test_wrong_dtype_raises() -> None:
     """A ValueError is raised when arrays have a dtype other than uint32."""
     dsu = DSU()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="expected uint32 array"):
         dsu.union(pa.array([0, 1], type=pa.int64()), pa.array([1, 2], type=pa.int64()))

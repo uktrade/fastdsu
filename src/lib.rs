@@ -22,7 +22,7 @@ impl From<CoreError> for PyErr {
 /// Disjoint set union over dense u32 node IDs.
 #[pyclass]
 pub struct DSU {
-    inner: DsuCore<u32>,
+    inner: DsuCore,
 }
 
 impl Default for DSU {
@@ -36,7 +36,7 @@ impl DSU {
     #[new]
     pub fn new() -> Self {
         Self {
-            inner: DsuCore::new(0),
+            inner: DsuCore::new(),
         }
     }
 
@@ -91,11 +91,21 @@ impl DSU {
     }
 }
 
+/// Extracts the underlying `&[u32]` slice from an Arrow array.
+///
+/// Returns an error if the array is not of type `UInt32`, or if it contains
+/// any null values.
 fn as_u32_slice(array: &ArrayRef) -> PyResult<&[u32]> {
     if array.data_type() != &DataType::UInt32 {
         return Err(PyValueError::new_err(format!(
             "expected uint32 array, got {:?}",
             array.data_type()
+        )));
+    }
+    if array.null_count() != 0 {
+        return Err(PyValueError::new_err(format!(
+            "expected non-nullable uint32 array, got {} null(s)",
+            array.null_count()
         )));
     }
     Ok(array.as_primitive::<UInt32Type>().values())

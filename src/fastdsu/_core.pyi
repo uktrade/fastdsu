@@ -8,6 +8,9 @@ if sys.version_info >= (3, 13):
 elif TYPE_CHECKING:
     class PyCapsule: ...
 
+else:
+    class PyCapSule: ...
+
 class SupportsArrowArray(Protocol):
     def __arrow_c_array__(
         self, requested_schema: PyCapsule | None = None
