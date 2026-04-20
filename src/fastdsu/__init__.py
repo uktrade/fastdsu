@@ -1,5 +1,9 @@
-from fastdsu._core import hello_from_bin
+"""Public Python API for fastdsu."""
 
+from importlib.metadata import version
 
-def main() -> None:
-    print(hello_from_bin())
+from fastdsu._core import DSU
+
+__version__ = version("fastdsu")
+
+__all__ = ["DSU"]
