@@ -1,3 +1,7 @@
+use arrow_array::ArrayRef;
+use arrow_array::cast::AsArray;
+use arrow_array::types::UInt32Type;
+use arrow_schema::DataType;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -7,8 +11,9 @@ use std::fmt;
 /// Errors produced by the DSU core.
 #[derive(Debug, PartialEq)]
 pub enum CoreError {
-    /// The src and dst edge buffers had differing lengths.
     LengthMismatch { src: usize, dst: usize },
+    WrongArrayType { expected: DataType, got: DataType },
+    NullsNotAllowed { count: usize },
 }
 
 impl fmt::Display for CoreError {
@@ -16,6 +21,12 @@ impl fmt::Display for CoreError {
         match self {
             Self::LengthMismatch { src, dst } => {
                 write!(f, "src length {src} does not match dst length {dst}")
+            }
+            Self::WrongArrayType { expected, got } => {
+                write!(f, "expected {expected:?} array, got {got:?}")
+            }
+            Self::NullsNotAllowed { count } => {
+                write!(f, "expected non-nullable array, got {count} null(s)")
             }
         }
     }
@@ -50,7 +61,17 @@ impl DsuCore {
     }
 
     /// Grow the node space to `new_len`, adding singleton nodes as needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_len` is less than the current [`Self::len`].
     pub fn grow(&mut self, new_len: usize) {
+        assert!(
+            new_len >= self.parent.len(),
+            "grow cannot shrink the node space (current: {}, requested: {})",
+            self.parent.len(),
+            new_len,
+        );
         let old_len = self.parent.len();
         self.parent.extend((old_len..new_len).map(|i| i as u32));
         self.rank.resize(new_len, 0);
@@ -111,12 +132,40 @@ impl DsuCore {
 }
 
 // ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Extracts the underlying `&[u32]` slice from an Arrow array.
+///
+/// Returns an error if the array is not of type `UInt32`, or if it contains
+/// any null values.
+pub fn as_u32_slice(array: &ArrayRef) -> Result<&[u32], CoreError> {
+    if array.data_type() != &DataType::UInt32 {
+        return Err(CoreError::WrongArrayType {
+            expected: DataType::UInt32,
+            got: array.data_type().clone(),
+        });
+    }
+    if array.null_count() != 0 {
+        return Err(CoreError::NullsNotAllowed {
+            count: array.null_count(),
+        });
+    }
+    Ok(array.as_primitive::<UInt32Type>().values())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use arrow_array::{Int32Array, UInt32Array};
+    use std::sync::Arc;
+
+    /// DSU
 
     #[test]
     /// Each node starts as its own root after grow.
@@ -140,6 +189,14 @@ mod tests {
         for (i, &label) in labels.iter().enumerate() {
             assert_eq!(label as usize, i);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "grow cannot shrink")]
+    fn grow_shrink_panics() {
+        let mut dsu = DsuCore::new();
+        dsu.grow(5);
+        dsu.grow(3);
     }
 
     #[test]
@@ -177,5 +234,19 @@ mod tests {
         dsu.grow(4);
         let result = dsu.union_edges(&[0, 1], &[1]);
         assert_eq!(result, Err(CoreError::LengthMismatch { src: 2, dst: 1 }));
+    }
+
+    /// Utility functions
+
+    #[test]
+    fn slice_wrong_type_errors() {
+        let array: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        assert!(as_u32_slice(&array).is_err());
+    }
+
+    #[test]
+    fn slice_nulls_error() {
+        let array: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
+        assert!(as_u32_slice(&array).is_err());
     }
 }

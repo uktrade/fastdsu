@@ -1,7 +1,5 @@
 mod core;
 
-use arrow_array::cast::AsArray;
-use arrow_array::types::UInt32Type;
 use arrow_array::{ArrayRef, UInt32Array};
 use arrow_buffer::Buffer;
 use arrow_data::ArrayData;
@@ -47,8 +45,8 @@ impl DSU {
         let (src_array, _) = src.into_inner();
         let (dst_array, _) = dst.into_inner();
 
-        let src_slice = as_u32_slice(&src_array)?;
-        let dst_slice = as_u32_slice(&dst_array)?;
+        let src_slice = core::as_u32_slice(&src_array).map_err(PyErr::from)?;
+        let dst_slice = core::as_u32_slice(&dst_array).map_err(PyErr::from)?;
 
         // Pre-scan to determine required capacity before releasing anything
         let max_id = src_slice
@@ -89,26 +87,6 @@ impl DSU {
             .into_any()
             .unbind())
     }
-}
-
-/// Extracts the underlying `&[u32]` slice from an Arrow array.
-///
-/// Returns an error if the array is not of type `UInt32`, or if it contains
-/// any null values.
-fn as_u32_slice(array: &ArrayRef) -> PyResult<&[u32]> {
-    if array.data_type() != &DataType::UInt32 {
-        return Err(PyValueError::new_err(format!(
-            "expected uint32 array, got {:?}",
-            array.data_type()
-        )));
-    }
-    if array.null_count() != 0 {
-        return Err(PyValueError::new_err(format!(
-            "expected non-nullable uint32 array, got {} null(s)",
-            array.null_count()
-        )));
-    }
-    Ok(array.as_primitive::<UInt32Type>().values())
 }
 
 #[pymodule]
