@@ -8,6 +8,7 @@ name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+ahash = "0.8"
 arrow-array = "58.1.0"
 arrow-buffer = "58.1.0"
 arrow-data = "58.1.0"

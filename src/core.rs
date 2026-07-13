@@ -4,6 +4,8 @@ use arrow_array::types::UInt32Type;
 use arrow_schema::DataType;
 use std::fmt;
 
+use crate::interner::Interner;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -132,6 +134,65 @@ impl DsuCore {
 }
 
 // ---------------------------------------------------------------------------
+// Dsu
+// ---------------------------------------------------------------------------
+
+/// Disjoint set union over arbitrary `u32` keys.
+///
+/// Keys are interned to a dense id space internally.
+pub struct Dsu {
+    interner: Interner,
+    core: DsuCore,
+}
+
+impl Default for Dsu {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Dsu {
+    /// Allocate an empty DSU.
+    pub fn new() -> Self {
+        Self {
+            interner: Interner::new(),
+            core: DsuCore::new(),
+        }
+    }
+
+    /// Union all edges from the `src` and `dst` key slices.
+    ///
+    /// Keys are interned as needed. Previously unseen keys become new
+    /// singleton nodes.
+    pub fn union_edges(&mut self, src: &[u32], dst: &[u32]) -> Result<(), CoreError> {
+        let src_ids: Vec<u32> = src.iter().map(|&k| self.interner.intern(k)).collect();
+        let dst_ids: Vec<u32> = dst.iter().map(|&k| self.interner.intern(k)).collect();
+
+        if self.interner.len() > self.core.len() {
+            self.core.grow(self.interner.len());
+        }
+
+        self.core.union_edges(&src_ids, &dst_ids)
+    }
+
+    /// Return every interned key alongside its component label.
+    ///
+    /// Keys are returned in first-seen order. The label is the original key
+    /// of whichever node became the root of that key's component. It is an 
+    /// arbitrary but stable representative, not a canonical choice such as the
+    /// smallest key.
+    pub fn components(&mut self) -> (Vec<u32>, Vec<u32>) {
+        let dense_labels = self.core.labels();
+        let keys = self.interner.keys().to_vec();
+        let labels = dense_labels
+            .iter()
+            .map(|&root_id| self.interner.decode(root_id))
+            .collect();
+        (keys, labels)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 
@@ -165,7 +226,7 @@ mod tests {
     use arrow_array::{Int32Array, UInt32Array};
     use std::sync::Arc;
 
-    /// DSU
+    /// DsuCore
 
     #[test]
     /// Each node starts as its own root after grow.
@@ -248,5 +309,60 @@ mod tests {
     fn slice_nulls_error() {
         let array: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
         assert!(as_u32_slice(&array).is_err());
+    }
+
+    /// Dsu
+
+    #[test]
+    /// Sparse, non-contiguous keys merge into one component.
+    fn dsu_unions_sparse_keys() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&[5, 1_000_000], &[1_000_000, 42]).unwrap();
+        let (keys, labels) = dsu.components();
+        let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
+        assert_eq!(label_of(5), label_of(1_000_000));
+        assert_eq!(label_of(1_000_000), label_of(42));
+    }
+
+    #[test]
+    /// Keys that are never unioned still appear as singleton components.
+    fn dsu_keeps_disjoint_keys_separate() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&[1, 2], &[2, 3]).unwrap();
+        dsu.union_edges(&[100], &[100]).unwrap();
+        let (keys, labels) = dsu.components();
+        let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
+        assert_eq!(label_of(1), label_of(2));
+        assert_eq!(label_of(2), label_of(3));
+        assert_ne!(label_of(1), label_of(100));
+    }
+
+    #[test]
+    /// The same key stays consistent across separate union_edges calls.
+    fn dsu_is_consistent_across_calls() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&[7], &[8]).unwrap();
+        dsu.union_edges(&[8], &[9]).unwrap();
+        let (keys, labels) = dsu.components();
+        let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
+        assert_eq!(label_of(7), label_of(8));
+        assert_eq!(label_of(8), label_of(9));
+    }
+
+    #[test]
+    /// components() returns keys in first-seen order.
+    fn dsu_components_first_seen_order() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&[9, 3], &[3, 1]).unwrap();
+        let (keys, _) = dsu.components();
+        assert_eq!(keys, vec![9, 3, 1]);
+    }
+
+    #[test]
+    /// Unequal src/dst slices return a LengthMismatch error.
+    fn dsu_length_mismatch_error() {
+        let mut dsu = Dsu::new();
+        let result = dsu.union_edges(&[1, 2], &[1]);
+        assert_eq!(result, Err(CoreError::LengthMismatch { src: 2, dst: 1 }));
     }
 }

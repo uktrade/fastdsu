@@ -14,13 +14,11 @@ If you need disjoint sets / connected components over Arrow in Python, the commo
 
 Pure Python requires leaving Arrow. SciPy requires leaving Arrow and constructing a sparse matrix — a large intermediate allocation entirely separate from the operation you actually want. Graph libraries bring heavy dependencies for what is fundamentally a simple algorithm.
 
-`fastdsu` accepts Arrow arrays directly: no intermediate objects, no unnecessary allocations. The node IDs in your arrays are the indices into the data structure — union-find runs at full speed on contiguous integer buffers, and results come back as Arrow arrays with no copy.
+`fastdsu` accepts Arrow arrays directly: no intermediate objects, no unnecessary allocations.
 
 ## Requirements
 
 Inputs must be non-nullable Arrow `uint32` arrays. `fastdsu` has no required Python dependencies — inputs and outputs use the Arrow C Data Interface protocol, so any Arrow-compatible library works at call time without being a declared dependency.
-
-Node IDs must be dense integers starting from zero.
 
 ## Usage
 
@@ -30,14 +28,14 @@ from fastdsu import DSU
 
 dsu = DSU()
 
-# Feed edge batches as they arrive — zero-copy in
+# Feed edge batches as they arrive: zero-copy in
 dsu.union(batch_1_src, batch_1_dst)
 dsu.union(batch_2_src, batch_2_dst)
 
-# Extract labels — zero-copy out, exposes __arrow_c_array__
-labels = dsu.labels()
-pa.array(labels)      # consume with PyArrow
-pl.Series(labels)     # or Polars, or any Arrow-compatible library
+# Extract components: zero-copy out, a two-column (key, label) Arrow table
+components = dsu.components()
+pa.record_batch(components)  # consume with PyArrow
+pl.from_arrow(components)    # or Polars, or any Arrow-compatible library
 ```
 
 Works naturally with Polars:
@@ -46,17 +44,20 @@ Works naturally with Polars:
 import polars as pl
 from fastdsu import DSU
 
-edges = pl.DataFrame({"src": [0, 1, 3, 4], "dst": [1, 2, 4, 5]})
+edges = pl.DataFrame({"src": [0, 1, 3, 4], "dst": [1, 2, 4, 5]}).cast(pl.UInt32)
 dsu = DSU()
 dsu.union(edges["src"].to_arrow(), edges["dst"].to_arrow())
 
-result = edges.with_columns(component=pl.Series(dsu.labels()))
+components = pl.from_arrow(dsu.components())
+result = edges.join(components, left_on="src", right_on="key", how="left")
 ```
 
 ## Contributing
 
-This project is managed using [uv](https://docs.astral.sh/uv/) with [just](https://just.systems/man/en/) as the task runner.
+[pre-commit](https://pre-commit.com/) is mandatory and must be turned on.
 
-```sh
-just
+```bash
+pre-commit install --install-hooks --overwrite -t commit-msg -t pre-commit
 ```
+
+This repo uses [`just`](https://just.systems/man/en/) as its task runner.
