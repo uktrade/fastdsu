@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use hashbrown::HashTable;
 
 /// Maps arbitrary `u32` keys to a dense, sequential `u32` id space.
 ///
@@ -6,16 +6,19 @@ use ahash::AHashMap;
 /// resolves to the same id for the lifetime of the interner.
 #[derive(Default)]
 pub struct Interner {
-    ids: AHashMap<u32, u32>,
+    // Holds the index into `keys`, not the key itself, so each key is held in one place.
+    ids: HashTable<u32>,
     keys: Vec<u32>,
+    hasher: ahash::RandomState,
 }
 
 impl Interner {
     /// Create an empty interner.
     pub fn new() -> Self {
         Self {
-            ids: AHashMap::new(),
+            ids: HashTable::new(),
             keys: Vec::new(),
+            hasher: ahash::RandomState::new(),
         }
     }
 
@@ -26,12 +29,14 @@ impl Interner {
 
     /// Resolve `key` to its dense id, assigning a new one if not yet seen.
     pub fn intern(&mut self, key: u32) -> u32 {
-        if let Some(&id) = self.ids.get(&key) {
+        let hash = self.hasher.hash_one(key);
+        if let Some(&id) = self.ids.find(hash, |&id| self.keys[id as usize] == key) {
             return id;
         }
         let id = self.keys.len() as u32;
         self.keys.push(key);
-        self.ids.insert(key, id);
+        self.ids
+            .insert_unique(hash, id, |&id| self.hasher.hash_one(self.keys[id as usize]));
         id
     }
 

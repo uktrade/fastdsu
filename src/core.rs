@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    /// The same key stays consistent across separate union_edges calls.
+    /// Interning is idempotent: the same key maps to the same node across separate `union_edges` calls.
     fn dsu_is_consistent_across_calls() {
         let mut dsu = Dsu::new();
         dsu.union_edges(&[7], &[8]).unwrap();
