@@ -1,15 +1,14 @@
 mod core;
+mod interner;
 
-use arrow_array::{ArrayRef, UInt32Array};
-use arrow_buffer::Buffer;
-use arrow_data::ArrayData;
-use arrow_schema::{DataType, Field};
+use arrow_array::{ArrayRef, RecordBatch, UInt32Array};
+use arrow_schema::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3_arrow::PyArray;
+use pyo3_arrow::{PyArray, PyRecordBatch};
 use std::sync::Arc;
 
-use crate::core::{CoreError, DsuCore};
+use crate::core::{CoreError, Dsu};
 
 impl From<CoreError> for PyErr {
     fn from(e: CoreError) -> PyErr {
@@ -17,10 +16,10 @@ impl From<CoreError> for PyErr {
     }
 }
 
-/// Disjoint set union over dense u32 node IDs.
+/// Disjoint set union over arbitrary `u32` keys.
 #[pyclass]
 pub struct DSU {
-    inner: DsuCore,
+    inner: Dsu,
 }
 
 impl Default for DSU {
@@ -33,9 +32,7 @@ impl Default for DSU {
 impl DSU {
     #[new]
     pub fn new() -> Self {
-        Self {
-            inner: DsuCore::new(),
-        }
+        Self { inner: Dsu::new() }
     }
 
     /// Union all edges from `src` and `dst`.
@@ -48,40 +45,30 @@ impl DSU {
         let src_slice = core::as_u32_slice(&src_array).map_err(PyErr::from)?;
         let dst_slice = core::as_u32_slice(&dst_array).map_err(PyErr::from)?;
 
-        // Pre-scan to determine required capacity before releasing anything
-        let max_id = src_slice
-            .iter()
-            .chain(dst_slice.iter())
-            .copied()
-            .max()
-            .map(|v| v as usize + 1)
-            .unwrap_or(0);
-
-        if max_id > self.inner.len() {
-            self.inner.grow(max_id);
-        }
-
         self.inner.union_edges(src_slice, dst_slice)?;
         Ok(())
     }
 
-    /// Return a label for each node as an Arrow uint32 array.
+    /// Return every key seen so far alongside its component label, as a
+    /// two-column Arrow table (`key`, `label`).
     ///
-    /// The returned array exposes `__arrow_c_array__` — consume it with
-    /// `pl.Series(dsu.labels())`, `pa.array(dsu.labels())`, or similar.
-    ///
-    /// Index = child_id, value = parent_id (the root of that component).
-    pub fn labels(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let buffer = Buffer::from_vec(self.inner.labels());
-        let len = buffer.len() / std::mem::size_of::<u32>();
-        let data = ArrayData::builder(DataType::UInt32)
-            .len(len)
-            .add_buffer(buffer)
-            .build()
+    /// The returned table exposes `__arrow_c_array__` — consume it with
+    /// `pl.from_arrow(dsu.components())`, `pa.record_batch(dsu.components())`,
+    /// or similar.
+    pub fn components(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let (keys, labels) = self.inner.components();
+
+        let key_array: ArrayRef = Arc::new(UInt32Array::from(keys));
+        let label_array: ArrayRef = Arc::new(UInt32Array::from(labels));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::UInt32, false),
+            Field::new("label", DataType::UInt32, false),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![key_array, label_array])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let array: ArrayRef = Arc::new(UInt32Array::from(data));
-        let field = Arc::new(Field::new("labels", DataType::UInt32, false));
-        Ok(PyArray::new(array, field)
+
+        Ok(PyRecordBatch::new(batch)
             .into_pyobject(py)
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .into_any()
