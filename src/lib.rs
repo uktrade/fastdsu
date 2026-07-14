@@ -81,4 +81,3 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DSU>()?;
     Ok(())
 }
-

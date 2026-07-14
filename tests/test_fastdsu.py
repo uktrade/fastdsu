@@ -111,4 +111,3 @@ def test_wrong_dtype_raises() -> None:
     dsu = DSU()
     with pytest.raises(ValueError, match="expected UInt32 array"):
         dsu.union(pa.array([0, 1], type=pa.int64()), pa.array([1, 2], type=pa.int64()))
-

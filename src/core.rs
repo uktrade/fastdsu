@@ -178,7 +178,7 @@ impl Dsu {
     /// Return every interned key alongside its component label.
     ///
     /// Keys are returned in first-seen order. The label is the original key
-    /// of whichever node became the root of that key's component. It is an 
+    /// of whichever node became the root of that key's component. It is an
     /// arbitrary but stable representative, not a canonical choice such as the
     /// smallest key.
     pub fn components(&mut self) -> (Vec<u32>, Vec<u32>) {

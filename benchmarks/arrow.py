@@ -113,9 +113,8 @@ def run_fastdsu(src: pa.Array, dst: pa.Array) -> pa.Table:
     """Run union-find using fastdsu and return labels as an Arrow table."""
     dsu = DSU()
     dsu.union(src, dst)
-    labels = pa.array(dsu.labels(), type=pa.uint32())
-    child_ids = pa.array(range(len(labels)), type=pa.uint32())
-    return pa.table({"child_id": child_ids, "parent_id": labels})
+    table = pa.table(dsu.components())
+    return table.rename_columns({"key": "child_id", "label": "parent_id"})
 
 
 def run_python_dsu(src: pa.Array, dst: pa.Array) -> pa.Table:
