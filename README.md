@@ -18,7 +18,9 @@ Pure Python requires leaving Arrow. SciPy requires leaving Arrow and constructin
 
 ## Requirements
 
-Inputs must be non-nullable Arrow `uint32` arrays. `fastdsu` has no required Python dependencies — inputs and outputs use the Arrow C Data Interface protocol, so any Arrow-compatible library works at call time without being a declared dependency.
+Inputs must be non-nullable Arrow arrays, both of the same data type, using a fixed-width integer type (`int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64`).
+
+`fastdsu` has no required Python dependencies — inputs and outputs use the Arrow C Data Interface protocol, so any Arrow-compatible library works at call time without being a declared dependency.
 
 ## Usage
 
