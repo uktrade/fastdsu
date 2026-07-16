@@ -14,25 +14,14 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-    
+    - name: Setup uv and just toolchain
+      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
+      with:
+        python-version: ${{ matrix.python-version }}
+
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
 
-    - name: Install uv and Python
-      uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
-      with:
-        python-version: ${{ matrix.python-version }}
-  
-    - name: Install just
-      uses: extractions/setup-crate@4993624604c307fbca528d28a3c8b60fa5ecc859 # v1.4.0
-      with:
-        repo: casey/just
-        version: 1.42.4
-    
-    - name: Install dependencies
-      run: uv sync --all-extras
-    
     - name: Run Python tests
       run: just test python
 
@@ -42,56 +31,38 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    
+
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-    
-    - name: Set up Rust
-      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
-    
-    - name: Install uv and Python
-      uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
+    - name: Setup uv and just toolchain
+      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
       with:
         python-version: "3.11"
-  
-    - name: Install just
-      uses: extractions/setup-crate@4993624604c307fbca528d28a3c8b60fa5ecc859 # v1.4.0
-      with:
-        repo: casey/just
-        version: 1.42.4
-    
-    - name: Install dependencies
-      run: uv sync --all-extras
+
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
 
     - name: Run Rust tests
       run: just test rust
-    
+
     - name: Run Python tests
       run: just test python
 
   format-and-lint:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - name: Setup uv and just toolchain
+      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
+      with:
+        python-version: "3.11"
 
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
-    
-    - name: Install uv and Python
-      uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
       with:
-        python-version: "3.11"
-  
-    - name: Install just
-      uses: extractions/setup-crate@4993624604c307fbca528d28a3c8b60fa5ecc859 # v1.4.0
-      with:
-        repo: casey/just
-        version: 1.42.4
-    
-    - name: Install dependencies
-      run: uv sync --all-extras
-    
+        components: |
+          rustfmt
+          clippy
+
     - name: Format and lint
       run: just format
 
@@ -99,22 +70,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Setup uv and just toolchain
+        uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
+        with:
+          python-version: "3.11"
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
 
-      - name: Install uv and Python
-        uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
-        with:
-          python-version: "3.11"
-
-      - name: Install just
-        uses: extractions/setup-crate@4993624604c307fbca528d28a3c8b60fa5ecc859 # v1.4.0
-        with:
-          repo: casey/just
-          version: 1.42.4
-          
       - name: Build the package
         run: uv build
 
