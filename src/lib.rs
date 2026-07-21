@@ -1,8 +1,8 @@
 mod core;
 mod interner;
 
-use arrow_array::{ArrayRef, RecordBatch, UInt32Array};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::RecordBatch;
+use arrow_schema::{Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3_arrow::{PyArray, PyRecordBatch};
@@ -16,7 +16,7 @@ impl From<CoreError> for PyErr {
     }
 }
 
-/// Disjoint set union over arbitrary `u32` keys.
+/// Disjoint set union over arbitrary fixed-width integer keys.
 #[pyclass]
 pub struct DSU {
     inner: Dsu,
@@ -37,15 +37,16 @@ impl DSU {
 
     /// Union all edges from `src` and `dst`.
     ///
-    /// Both arrays must be non-nullable Arrow uint32 arrays of equal length.
+    /// Both arrays must be non-nullable Arrow arrays of equal length and the
+    /// same data type. Any fixed-width integer type is accepted (`Int8`
+    /// through `UInt64`). Floats, strings, and binary are not yet
+    /// supported. The data type of the first array passed to `union()`
+    /// fixes the key type for this `DSU`'s lifetime.
     pub fn union(&mut self, src: PyArray, dst: PyArray) -> PyResult<()> {
         let (src_array, _) = src.into_inner();
         let (dst_array, _) = dst.into_inner();
 
-        let src_slice = core::as_u32_slice(&src_array).map_err(PyErr::from)?;
-        let dst_slice = core::as_u32_slice(&dst_array).map_err(PyErr::from)?;
-
-        self.inner.union_edges(src_slice, dst_slice)?;
+        self.inner.union_edges(&src_array, &dst_array)?;
         Ok(())
     }
 
@@ -56,14 +57,11 @@ impl DSU {
     /// `pl.from_arrow(dsu.components())`, `pa.record_batch(dsu.components())`,
     /// or similar.
     pub fn components(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (keys, labels) = self.inner.components();
-
-        let key_array: ArrayRef = Arc::new(UInt32Array::from(keys));
-        let label_array: ArrayRef = Arc::new(UInt32Array::from(labels));
+        let (key_array, label_array) = self.inner.components();
 
         let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::UInt32, false),
-            Field::new("label", DataType::UInt32, false),
+            Field::new("key", key_array.data_type().clone(), false),
+            Field::new("label", label_array.data_type().clone(), false),
         ]));
         let batch = RecordBatch::try_new(schema.clone(), vec![key_array, label_array])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;

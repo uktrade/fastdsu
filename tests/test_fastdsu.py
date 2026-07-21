@@ -106,8 +106,48 @@ def test_length_mismatch_raises() -> None:
         dsu.union(pa.array([0], type=pa.uint32()), pa.array([1, 2], type=pa.uint32()))
 
 
-def test_wrong_dtype_raises() -> None:
-    """A ValueError is raised when arrays have a dtype other than uint32."""
+@pytest.mark.parametrize("arrow_type", [pa.int8(), pa.uint64()])
+def test_many_integer_dtypes_accepted(arrow_type: pa.DataType) -> None:
+    """union()/components() work with any fixed-width integer key type."""
     dsu = DSU()
-    with pytest.raises(ValueError, match="expected UInt32 array"):
+    dsu.union(
+        pa.array([0, 1], type=arrow_type),
+        pa.array([1, 2], type=arrow_type),
+    )
+    components = pl.from_arrow(dsu.components())
+    assert label_of(components, 0) == label_of(components, 1)
+    assert label_of(components, 1) == label_of(components, 2)
+
+
+def test_cross_call_dtype_mismatch_raises() -> None:
+    """A ValueError is raised when a later union() call uses a different dtype."""
+    dsu = DSU()
+    dsu.union(pa.array([0, 1], type=pa.uint32()), pa.array([1, 2], type=pa.uint32()))
+    with pytest.raises(ValueError):
         dsu.union(pa.array([0, 1], type=pa.int64()), pa.array([1, 2], type=pa.int64()))
+
+
+def test_src_dst_dtype_mismatch_raises() -> None:
+    """A ValueError is raised when src and dst have different dtypes in one call."""
+    dsu = DSU()
+    with pytest.raises(ValueError):
+        dsu.union(pa.array([0, 1], type=pa.uint32()), pa.array([1, 2], type=pa.int64()))
+
+
+def test_unsupported_dtype_raises() -> None:
+    """A ValueError is raised for dtypes outside the fixed-width integer set."""
+    dsu = DSU()
+    with pytest.raises(ValueError, match="unsupported"):
+        dsu.union(
+            pa.array(["a", "b"], type=pa.string()),
+            pa.array(["b", "c"], type=pa.string()),
+        )
+
+
+def test_nulls_raise_for_integer_dtype() -> None:
+    """Nulls are rejected regardless of the array's integer dtype."""
+    dsu = DSU()
+    with pytest.raises(ValueError, match="null"):
+        dsu.union(
+            pa.array([0, None], type=pa.uint32()), pa.array([1, 2], type=pa.uint32())
+        )

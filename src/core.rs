@@ -1,6 +1,4 @@
 use arrow_array::ArrayRef;
-use arrow_array::cast::AsArray;
-use arrow_array::types::UInt32Type;
 use arrow_schema::DataType;
 use std::fmt;
 
@@ -14,8 +12,10 @@ use crate::interner::Interner;
 #[derive(Debug, PartialEq)]
 pub enum CoreError {
     LengthMismatch { src: usize, dst: usize },
-    WrongArrayType { expected: DataType, got: DataType },
+    KeyTypeMismatch { expected: DataType, got: DataType },
+    UnsupportedType(DataType),
     NullsNotAllowed { count: usize },
+    TooManyKeys,
 }
 
 impl fmt::Display for CoreError {
@@ -24,11 +24,17 @@ impl fmt::Display for CoreError {
             Self::LengthMismatch { src, dst } => {
                 write!(f, "src length {src} does not match dst length {dst}")
             }
-            Self::WrongArrayType { expected, got } => {
+            Self::KeyTypeMismatch { expected, got } => {
                 write!(f, "expected {expected:?} array, got {got:?}")
+            }
+            Self::UnsupportedType(data_type) => {
+                write!(f, "unsupported key type {data_type:?}")
             }
             Self::NullsNotAllowed { count } => {
                 write!(f, "expected non-nullable array, got {count} null(s)")
+            }
+            Self::TooManyKeys => {
+                write!(f, "cannot intern more than u32::MAX distinct keys")
             }
         }
     }
@@ -137,7 +143,7 @@ impl DsuCore {
 // Dsu
 // ---------------------------------------------------------------------------
 
-/// Disjoint set union over arbitrary `u32` keys.
+/// Disjoint set union over arbitrary fixed-width integer keys.
 ///
 /// Keys are interned to a dense id space internally.
 pub struct Dsu {
@@ -160,13 +166,23 @@ impl Dsu {
         }
     }
 
-    /// Union all edges from the `src` and `dst` key slices.
+    /// Union all edges from the `src` and `dst` key arrays.
     ///
-    /// Keys are interned as needed. Previously unseen keys become new
-    /// singleton nodes.
-    pub fn union_edges(&mut self, src: &[u32], dst: &[u32]) -> Result<(), CoreError> {
-        let src_ids: Vec<u32> = src.iter().map(|&k| self.interner.intern(k)).collect();
-        let dst_ids: Vec<u32> = dst.iter().map(|&k| self.interner.intern(k)).collect();
+    /// Both arrays must be non-nullable Arrow arrays of equal length and the
+    /// same `DataType`. Keys are interned as needed. The `DataType` of the
+    /// first array seen fixes the key type for this `Dsu`'s lifetime.
+    /// Previously unseen keys become new singleton nodes.
+    pub fn union_edges(&mut self, src: &ArrayRef, dst: &ArrayRef) -> Result<(), CoreError> {
+        for array in [src, dst] {
+            if array.null_count() != 0 {
+                return Err(CoreError::NullsNotAllowed {
+                    count: array.null_count(),
+                });
+            }
+        }
+
+        let src_ids = self.interner.intern_array(src)?;
+        let dst_ids = self.interner.intern_array(dst)?;
 
         if self.interner.len() > self.core.len() {
             self.core.grow(self.interner.len());
@@ -181,38 +197,12 @@ impl Dsu {
     /// of whichever node became the root of that key's component. It is an
     /// arbitrary but stable representative, not a canonical choice such as the
     /// smallest key.
-    pub fn components(&mut self) -> (Vec<u32>, Vec<u32>) {
+    pub fn components(&mut self) -> (ArrayRef, ArrayRef) {
         let dense_labels = self.core.labels();
-        let keys = self.interner.keys().to_vec();
-        let labels = dense_labels
-            .iter()
-            .map(|&root_id| self.interner.decode(root_id))
-            .collect();
+        let keys = self.interner.keys_array();
+        let labels = self.interner.decode_ids_to_array(&dense_labels);
         (keys, labels)
     }
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-/// Extracts the underlying `&[u32]` slice from an Arrow array.
-///
-/// Returns an error if the array is not of type `UInt32`, or if it contains
-/// any null values.
-pub fn as_u32_slice(array: &ArrayRef) -> Result<&[u32], CoreError> {
-    if array.data_type() != &DataType::UInt32 {
-        return Err(CoreError::WrongArrayType {
-            expected: DataType::UInt32,
-            got: array.data_type().clone(),
-        });
-    }
-    if array.null_count() != 0 {
-        return Err(CoreError::NullsNotAllowed {
-            count: array.null_count(),
-        });
-    }
-    Ok(array.as_primitive::<UInt32Type>().values())
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +213,9 @@ pub fn as_u32_slice(array: &ArrayRef) -> Result<&[u32], CoreError> {
 mod tests {
     use super::*;
 
-    use arrow_array::{Int32Array, UInt32Array};
+    use arrow_array::UInt32Array;
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::UInt32Type;
     use std::sync::Arc;
 
     /// DsuCore
@@ -297,28 +289,28 @@ mod tests {
         assert_eq!(result, Err(CoreError::LengthMismatch { src: 2, dst: 1 }));
     }
 
-    /// Utility functions
+    // Dsu
 
-    #[test]
-    fn slice_wrong_type_errors() {
-        let array: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
-        assert!(as_u32_slice(&array).is_err());
+    fn u32_array(values: Vec<u32>) -> ArrayRef {
+        Arc::new(UInt32Array::from(values))
     }
 
-    #[test]
-    fn slice_nulls_error() {
-        let array: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
-        assert!(as_u32_slice(&array).is_err());
+    fn u32_values(array: &ArrayRef) -> Vec<u32> {
+        array.as_primitive::<UInt32Type>().values().to_vec()
     }
-
-    /// Dsu
 
     #[test]
     /// Sparse, non-contiguous keys merge into one component.
     fn dsu_unions_sparse_keys() {
         let mut dsu = Dsu::new();
-        dsu.union_edges(&[5, 1_000_000], &[1_000_000, 42]).unwrap();
+        dsu.union_edges(
+            &u32_array(vec![5, 1_000_000]),
+            &u32_array(vec![1_000_000, 42]),
+        )
+        .unwrap();
         let (keys, labels) = dsu.components();
+        let keys = u32_values(&keys);
+        let labels = u32_values(&labels);
         let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
         assert_eq!(label_of(5), label_of(1_000_000));
         assert_eq!(label_of(1_000_000), label_of(42));
@@ -328,9 +320,13 @@ mod tests {
     /// Keys that are never unioned still appear as singleton components.
     fn dsu_keeps_disjoint_keys_separate() {
         let mut dsu = Dsu::new();
-        dsu.union_edges(&[1, 2], &[2, 3]).unwrap();
-        dsu.union_edges(&[100], &[100]).unwrap();
+        dsu.union_edges(&u32_array(vec![1, 2]), &u32_array(vec![2, 3]))
+            .unwrap();
+        dsu.union_edges(&u32_array(vec![100]), &u32_array(vec![100]))
+            .unwrap();
         let (keys, labels) = dsu.components();
+        let keys = u32_values(&keys);
+        let labels = u32_values(&labels);
         let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
         assert_eq!(label_of(1), label_of(2));
         assert_eq!(label_of(2), label_of(3));
@@ -341,9 +337,13 @@ mod tests {
     /// Interning is idempotent: the same key maps to the same node across separate `union_edges` calls.
     fn dsu_is_consistent_across_calls() {
         let mut dsu = Dsu::new();
-        dsu.union_edges(&[7], &[8]).unwrap();
-        dsu.union_edges(&[8], &[9]).unwrap();
+        dsu.union_edges(&u32_array(vec![7]), &u32_array(vec![8]))
+            .unwrap();
+        dsu.union_edges(&u32_array(vec![8]), &u32_array(vec![9]))
+            .unwrap();
         let (keys, labels) = dsu.components();
+        let keys = u32_values(&keys);
+        let labels = u32_values(&labels);
         let label_of = |key: u32| labels[keys.iter().position(|&k| k == key).unwrap()];
         assert_eq!(label_of(7), label_of(8));
         assert_eq!(label_of(8), label_of(9));
@@ -353,16 +353,26 @@ mod tests {
     /// components() returns keys in first-seen order.
     fn dsu_components_first_seen_order() {
         let mut dsu = Dsu::new();
-        dsu.union_edges(&[9, 3], &[3, 1]).unwrap();
+        dsu.union_edges(&u32_array(vec![9, 3]), &u32_array(vec![3, 1]))
+            .unwrap();
         let (keys, _) = dsu.components();
-        assert_eq!(keys, vec![9, 3, 1]);
+        assert_eq!(u32_values(&keys), vec![9, 3, 1]);
     }
 
     #[test]
     /// Unequal src/dst slices return a LengthMismatch error.
     fn dsu_length_mismatch_error() {
         let mut dsu = Dsu::new();
-        let result = dsu.union_edges(&[1, 2], &[1]);
+        let result = dsu.union_edges(&u32_array(vec![1, 2]), &u32_array(vec![1]));
         assert_eq!(result, Err(CoreError::LengthMismatch { src: 2, dst: 1 }));
+    }
+
+    #[test]
+    /// Nulls are rejected regardless of the array's DataType.
+    fn dsu_nulls_not_allowed() {
+        let mut dsu = Dsu::new();
+        let src: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
+        let result = dsu.union_edges(&src, &u32_array(vec![1, 2]));
+        assert_eq!(result, Err(CoreError::NullsNotAllowed { count: 1 }));
     }
 }
