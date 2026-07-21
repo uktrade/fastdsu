@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 use crate::core::CoreError;
 
+/// Storage layer for a single native key type. `Interner` is a thin
+/// wrapper that dispatches to this via the `Keys` enum.
+///
 /// Maps a slice of native `Copy` values to a dense, sequential `u32` id
 /// space. Ids are assigned in first-seen order starting at `0`. The same
 /// value always resolves to the same id.
@@ -24,6 +27,12 @@ struct PrimitiveKeys<T> {
     hasher: ahash::RandomState,
 }
 
+/// Convert a `keys` length to the next `u32` id, or
+/// [`CoreError::TooManyKeys`] if the id space is exhausted.
+fn checked_next_id(len: usize) -> Result<u32, CoreError> {
+    u32::try_from(len).map_err(|_| CoreError::TooManyKeys)
+}
+
 impl<T: Copy + Eq + std::hash::Hash> PrimitiveKeys<T> {
     fn new() -> Self {
         Self {
@@ -34,23 +43,32 @@ impl<T: Copy + Eq + std::hash::Hash> PrimitiveKeys<T> {
     }
 
     /// Resolve every value in `values` to its dense id, assigning new ids
-    /// for values not yet seen. Never allocates beyond a genuinely new
-    /// value, since `T` is `Copy`.
-    fn intern_slice(&mut self, values: &[T]) -> Vec<u32> {
-        values
-            .iter()
-            .map(|&value| {
-                let hash = self.hasher.hash_one(value);
-                if let Some(&id) = self.ids.find(hash, |&id| self.keys[id as usize] == value) {
-                    return id;
-                }
-                let id = self.keys.len() as u32;
+    /// for values not yet seen. Interning an already-seen value never
+    /// allocates, since `T` is `Copy` and we reuse the existing key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::TooManyKeys`] if assigning a new id would
+    /// exceed `u32::MAX` distinct keys.
+    fn intern_slice(&mut self, values: &[T]) -> Result<Vec<u32>, CoreError> {
+        // Built as a plain loop rather than `.map(...).collect()` so the hot
+        // path only ever moves a bare `u32`, not a `Result<u32, CoreError>`
+        // (much larger, since `CoreError` embeds `DataType`) on every value.
+        let mut ids = Vec::with_capacity(values.len());
+        for &value in values {
+            let hash = self.hasher.hash_one(value);
+            let id = if let Some(&id) = self.ids.find(hash, |&id| self.keys[id as usize] == value) {
+                id
+            } else {
+                let id = checked_next_id(self.keys.len())?;
                 self.keys.push(value);
                 self.ids
                     .insert_unique(hash, id, |&id| self.hasher.hash_one(self.keys[id as usize]));
                 id
-            })
-            .collect()
+            };
+            ids.push(id);
+        }
+        Ok(ids)
     }
 }
 
@@ -85,7 +103,7 @@ macro_rules! primitive_keys {
                 }
             }
 
-            fn intern(&mut self, array: &ArrayRef) -> Vec<u32> {
+            fn intern(&mut self, array: &ArrayRef) -> Result<Vec<u32>, CoreError> {
                 match self {
                     $(Keys::$variant(keys) => {
                         keys.intern_slice(array.as_primitive::<$arrow_ty>().values())
@@ -152,6 +170,8 @@ impl Interner {
     /// different (but supported) `DataType` return
     /// [`CoreError::KeyTypeMismatch`]. A `DataType` outside the supported
     /// fixed-width integer set returns [`CoreError::UnsupportedType`].
+    /// Assigning an id beyond `u32::MAX` distinct keys returns
+    /// [`CoreError::TooManyKeys`].
     pub fn intern_array(&mut self, array: &ArrayRef) -> Result<Vec<u32>, CoreError> {
         if self.keys.is_none() {
             let keys = Keys::for_data_type(array.data_type())
@@ -166,7 +186,7 @@ impl Interner {
                 got: array.data_type().clone(),
             });
         }
-        Ok(keys.intern(array))
+        keys.intern(array)
     }
 
     /// Resolve dense ids back to an Arrow array of the established key type.
@@ -316,5 +336,15 @@ mod tests {
         let array: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
         let err = interner.intern_array(&array).unwrap_err();
         assert_eq!(err, CoreError::UnsupportedType(DataType::Utf8));
+    }
+
+    #[test]
+    /// Assigning an id beyond u32::MAX errors instead of silently wrapping.
+    fn too_many_keys_errors_instead_of_wrapping() {
+        assert_eq!(checked_next_id(u32::MAX as usize), Ok(u32::MAX));
+        assert_eq!(
+            checked_next_id(u32::MAX as usize + 1),
+            Err(CoreError::TooManyKeys)
+        );
     }
 }

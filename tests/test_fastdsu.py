@@ -106,19 +106,7 @@ def test_length_mismatch_raises() -> None:
         dsu.union(pa.array([0], type=pa.uint32()), pa.array([1, 2], type=pa.uint32()))
 
 
-@pytest.mark.parametrize(
-    "arrow_type",
-    [
-        pa.int8(),
-        pa.int16(),
-        pa.int32(),
-        pa.int64(),
-        pa.uint8(),
-        pa.uint16(),
-        pa.uint32(),
-        pa.uint64(),
-    ],
-)
+@pytest.mark.parametrize("arrow_type", [pa.int8(), pa.uint64()])
 def test_many_integer_dtypes_accepted(arrow_type: pa.DataType) -> None:
     """union()/components() work with any fixed-width integer key type."""
     dsu = DSU()

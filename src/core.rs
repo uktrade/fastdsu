@@ -15,6 +15,7 @@ pub enum CoreError {
     KeyTypeMismatch { expected: DataType, got: DataType },
     UnsupportedType(DataType),
     NullsNotAllowed { count: usize },
+    TooManyKeys,
 }
 
 impl fmt::Display for CoreError {
@@ -31,6 +32,9 @@ impl fmt::Display for CoreError {
             }
             Self::NullsNotAllowed { count } => {
                 write!(f, "expected non-nullable array, got {count} null(s)")
+            }
+            Self::TooManyKeys => {
+                write!(f, "cannot intern more than u32::MAX distinct keys")
             }
         }
     }
@@ -209,9 +213,9 @@ impl Dsu {
 mod tests {
     use super::*;
 
+    use arrow_array::UInt32Array;
     use arrow_array::cast::AsArray;
     use arrow_array::types::UInt32Type;
-    use arrow_array::{Int64Array, StringArray, UInt32Array};
     use std::sync::Arc;
 
     /// DsuCore
@@ -370,32 +374,5 @@ mod tests {
         let src: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
         let result = dsu.union_edges(&src, &u32_array(vec![1, 2]));
         assert_eq!(result, Err(CoreError::NullsNotAllowed { count: 1 }));
-    }
-
-    #[test]
-    /// A different (but supported) key type on a later call is rejected.
-    fn dsu_key_type_mismatch_error() {
-        let mut dsu = Dsu::new();
-        dsu.union_edges(&u32_array(vec![1, 2]), &u32_array(vec![2, 3]))
-            .unwrap();
-        let other: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2]));
-        let result = dsu.union_edges(&other, &other.clone());
-        assert_eq!(
-            result,
-            Err(CoreError::KeyTypeMismatch {
-                expected: DataType::UInt32,
-                got: DataType::Int64,
-            })
-        );
-    }
-
-    #[test]
-    /// A type outside the fixed-width integer set is rejected.
-    fn dsu_unsupported_type_error() {
-        let mut dsu = Dsu::new();
-        let src: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
-        let dst: ArrayRef = Arc::new(StringArray::from(vec!["b", "c"]));
-        let result = dsu.union_edges(&src, &dst);
-        assert_eq!(result, Err(CoreError::UnsupportedType(DataType::Utf8)));
     }
 }
