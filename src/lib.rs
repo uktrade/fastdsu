@@ -18,11 +18,11 @@ impl From<CoreError> for PyErr {
 
 /// Wrap a `(key, label)` array pair as a two-column Arrow record batch,
 /// exposed to Python via the Arrow C Data Interface.
-fn components_to_pyobject(
-    py: Python<'_>,
+fn components_to_pyobject<'py>(
+    py: Python<'py>,
     key_array: arrow_array::ArrayRef,
     label_array: arrow_array::ArrayRef,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", key_array.data_type().clone(), false),
         Field::new("label", label_array.data_type().clone(), false),
@@ -33,8 +33,7 @@ fn components_to_pyobject(
     Ok(PyRecordBatch::new(batch)
         .into_pyobject(py)
         .map_err(|e| PyValueError::new_err(e.to_string()))?
-        .into_any()
-        .unbind())
+        .into_any())
 }
 
 /// Disjoint set union over arbitrary fixed-width integer keys.
@@ -77,7 +76,7 @@ impl DSU {
     /// The returned table exposes `__arrow_c_array__` — consume it with
     /// `pl.from_arrow(dsu.components())`, `pa.record_batch(dsu.components())`,
     /// or similar.
-    pub fn components(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    pub fn components<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let (key_array, label_array) = self.inner.components();
         components_to_pyobject(py, key_array, label_array)
     }
@@ -90,7 +89,11 @@ impl DSU {
 /// non-nullable, of equal length, and the same data type (any fixed-width
 /// integer type, `Int8` through `UInt64`).
 #[pyfunction]
-fn connected_components(py: Python<'_>, src: PyArray, dst: PyArray) -> PyResult<Py<PyAny>> {
+fn connected_components<'py>(
+    py: Python<'py>,
+    src: PyArray,
+    dst: PyArray,
+) -> PyResult<Bound<'py, PyAny>> {
     let (src_array, _) = src.into_inner();
     let (dst_array, _) = dst.into_inner();
 
