@@ -54,6 +54,18 @@ components = pl.from_arrow(dsu.components())
 result = edges.join(components, left_on="src", right_on="key", how="left")
 ```
 
+### One-shot convenience function
+
+For a single batch of edges, `connected_components` skips constructing a `DSU`:
+
+```python
+import pyarrow as pa
+from fastdsu import connected_components
+
+components = connected_components(src, dst)
+pa.record_batch(components)
+```
+
 ## Contributing
 
 [pre-commit](https://pre-commit.com/) is mandatory and must be turned on.

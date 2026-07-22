@@ -5,7 +5,7 @@ from __future__ import annotations
 import polars as pl
 import pyarrow as pa
 import pytest
-from fastdsu import DSU
+from fastdsu import DSU, connected_components
 
 
 def src_dst(*pairs: tuple[int, int]) -> tuple[pa.Array, pa.Array]:
@@ -150,4 +150,25 @@ def test_nulls_raise_for_integer_dtype() -> None:
     with pytest.raises(ValueError, match="null"):
         dsu.union(
             pa.array([0, None], type=pa.uint32()), pa.array([1, 2], type=pa.uint32())
+        )
+
+
+def test_connected_components_merges_and_separates() -> None:
+    """connected_components() unions edges and groups components in one call."""
+    components = pl.from_arrow(connected_components(*src_dst((0, 1), (1, 2), (3, 4))))
+    assert label_of(components, 0) == label_of(components, 1) == label_of(components, 2)
+    assert label_of(components, 0) != label_of(components, 3)
+
+
+def test_connected_components_empty_input() -> None:
+    """connected_components() with empty arrays produces an empty components table."""
+    empty = pa.array([], type=pa.uint32())
+    assert len(pl.from_arrow(connected_components(empty, empty))) == 0
+
+
+def test_connected_components_raises_on_length_mismatch() -> None:
+    """A ValueError is raised when src and dst arrays have different lengths."""
+    with pytest.raises(ValueError, match="length"):
+        connected_components(
+            pa.array([0], type=pa.uint32()), pa.array([1, 2], type=pa.uint32())
         )
