@@ -22,8 +22,11 @@ jobs:
         ]
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
       - name: Setup uv and just toolchain
-        uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
+        uses: ./.github/actions/setup-toolchain
         with:
           python-version: "3.11"
           install-just: "false"
@@ -53,6 +56,9 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
       - name: Setup uv and just toolchain
         uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
         with:

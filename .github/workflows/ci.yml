@@ -14,16 +14,19 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-    - name: Setup uv and just toolchain
-      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
-      with:
-        python-version: ${{ matrix.python-version }}
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
+      - name: Setup uv and just toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          python-version: ${{ matrix.python-version }}
 
-    - name: Set up Rust
-      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
 
-    - name: Run Python tests
-      run: just test python
+      - name: Run Python tests
+        run: just test python
 
   test-os:
     name: test on ${{ matrix.os }}
@@ -33,45 +36,54 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
-    - name: Setup uv and just toolchain
-      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
-      with:
-        python-version: "3.11"
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
+      - name: Setup uv and just toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          python-version: "3.11"
 
-    - name: Set up Rust
-      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
 
-    - name: Run Rust tests
-      run: just test rust
+      - name: Run Rust tests
+        run: just test rust
 
-    - name: Run Python tests
-      run: just test python
+      - name: Run Python tests
+        run: just test python
 
   format-and-lint:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Setup uv and just toolchain
-      uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
-      with:
-        python-version: "3.11"
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
+      - name: Setup uv and just toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          python-version: "3.11"
 
-    - name: Set up Rust
-      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
-      with:
-        components: |
-          rustfmt
-          clippy
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+        with:
+          components: |
+            rustfmt
+            clippy
 
-    - name: Format and lint
-      run: just format
+      - name: Format and lint
+        run: just format
 
   build-package:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        
       - name: Setup uv and just toolchain
-        uses: uktrade/actions-data-matching/setup-toolchain@f67fade25dc6c04707d341d6c524b81db42514a5 # v1.0.0
+        uses: ./.github/actions/setup-toolchain
         with:
           python-version: "3.11"
 
