@@ -1,0 +1,33 @@
+name: Rust Dynamic Version
+description: Set the Cargo package version from a Git tag for maturin builds.
+
+inputs:
+  version:
+    description: Version to use. Defaults to the current Git ref name.
+    required: false
+    default: ""
+  manifest-path:
+    description: Path to Cargo.toml.
+    required: false
+    default: Cargo.toml
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        MANIFEST_PATH: ${{ inputs['manifest-path'] }}
+      run: |
+        set -euo pipefail
+
+        version="${VERSION:-$GITHUB_REF_NAME}"
+        version="${version#[vV]}"
+        version="$(sed -E \
+          -e 's/^([0-9]+\.[0-9]+\.[0-9]+)rc([0-9]+)$/\1-rc.\2/' \
+          -e 's/^([0-9]+\.[0-9]+\.[0-9]+)\.dev([0-9]+)$/\1-dev.\2/' \
+          <<< "$version")"
+
+        sed -i -E \
+          "/^\[package\]/,/^\[/ s/^version = \"[^\"]+\"/version = \"$version\"/" \
+          "$MANIFEST_PATH"
