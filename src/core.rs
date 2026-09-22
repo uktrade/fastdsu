@@ -209,10 +209,8 @@ impl Dsu {
 
     /// Return every interned key alongside its component label.
     ///
-    /// Keys are returned in first-seen order. The label is the original key
-    /// of whichever node became the root of that key's component. It is an
-    /// arbitrary but stable representative, not a canonical choice such as the
-    /// smallest key.
+    /// Keys are returned in first-seen order. Each component's label is its
+    /// smallest original key, independent of edge insertion order.
     pub fn components(&mut self) -> (ArrayRef, ArrayRef) {
         let dense_labels = self.core.labels();
         let keys = self.interner.keys_array();
@@ -232,6 +230,7 @@ mod tests {
     use arrow_array::UInt32Array;
     use arrow_array::cast::AsArray;
     use arrow_array::types::UInt32Type;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     /// DsuCore
@@ -399,6 +398,33 @@ mod tests {
             .unwrap();
         let (keys, _) = dsu.components();
         assert_eq!(u32_values(&keys), vec![9, 3, 1]);
+    }
+
+    #[test]
+    /// components() returns insertion order-invariant labels
+    fn dsu_labels_canonical_across_edge_orders() {
+        let mut forward = Dsu::new();
+        forward
+            .union_edges(&u32_array(vec![1, 2]), &u32_array(vec![2, 3]))
+            .unwrap();
+
+        let mut reversed = Dsu::new();
+        reversed
+            .union_edges(&u32_array(vec![2, 1]), &u32_array(vec![3, 2]))
+            .unwrap();
+
+        fn component_map(dsu: &mut Dsu) -> HashMap<u32, u32> {
+            let (keys, labels) = dsu.components();
+            u32_values(&keys)
+                .into_iter()
+                .zip(u32_values(&labels))
+                .collect()
+        }
+
+        let expected = HashMap::from([(1, 1), (2, 1), (3, 1)]);
+
+        assert_eq!(component_map(&mut forward), expected);
+        assert_eq!(component_map(&mut reversed), expected);
     }
 
     #[test]

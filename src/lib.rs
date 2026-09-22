@@ -85,9 +85,12 @@ impl DSU {
     /// Return every key seen so far alongside its component label, as a
     /// two-column Arrow table (`key`, `label`).
     ///
-    /// The returned table exposes `__arrow_c_array__` — consume it with
-    /// `pl.from_arrow(dsu.components())`, `pa.record_batch(dsu.components())`,
-    /// or similar.
+    /// Keys are returned in first-seen order. Each component's label is its
+    /// smallest key, independent of edge insertion order.
+    ///
+    /// The result implements the Arrow PyCapsule Interface, so it can be passed
+    /// directly to Arrow-compatible consumers such as
+    /// `pl.from_arrow(dsu.components())` or `pa.record_batch(dsu.components())`.
     pub fn components<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let (key_array, label_array) = self.inner.components();
         components_to_pyobject(py, key_array, label_array)
