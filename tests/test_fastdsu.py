@@ -92,6 +92,21 @@ def test_added_key_can_be_unioned() -> None:
     assert label_of(components, 0) != label_of(components, 2)
 
 
+def test_add_rejects_nulls() -> None:
+    """add() rejects arrays containing nulls."""
+    dsu = DSU()
+    with pytest.raises(ValueError, match="null"):
+        dsu.add(pa.array([0, None], type=pa.uint32()))
+
+
+def test_add_enforces_established_dtype() -> None:
+    """add() must use the DSU's established key type."""
+    dsu = DSU()
+    dsu.add(pa.array([0], type=pa.uint32()))
+    with pytest.raises(ValueError):
+        dsu.add(pa.array([1], type=pa.int64()))
+
+
 def test_components_first_seen_order() -> None:
     """components() returns keys in the order they were first encountered."""
     dsu = DSU()
