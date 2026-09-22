@@ -72,6 +72,41 @@ def test_components_include_every_key_seen() -> None:
     assert label_of(components, 1) != label_of(components, 100)
 
 
+def test_add_creates_singleton_components() -> None:
+    """add() introduces each unseen key as a singleton exactly once."""
+    dsu = DSU()
+    dsu.add(pa.array([9, 3, 9], type=pa.uint32()))
+    dsu.add(pa.array([3, 9], type=pa.uint32()))
+    components = pl.from_arrow(dsu.components())
+    assert components["key"].to_list() == [9, 3]
+    assert label_of(components, 9) != label_of(components, 3)
+
+
+def test_added_key_can_be_unioned() -> None:
+    """A key added as a singleton can later be connected by union()."""
+    dsu = DSU()
+    dsu.add(pa.array([0, 2], type=pa.uint32()))
+    dsu.union(*src_dst((0, 1)))
+    components = pl.from_arrow(dsu.components())
+    assert label_of(components, 0) == label_of(components, 1)
+    assert label_of(components, 0) != label_of(components, 2)
+
+
+def test_add_rejects_nulls() -> None:
+    """add() rejects arrays containing nulls."""
+    dsu = DSU()
+    with pytest.raises(ValueError, match="null"):
+        dsu.add(pa.array([0, None], type=pa.uint32()))
+
+
+def test_add_enforces_established_dtype() -> None:
+    """add() must use the DSU's established key type."""
+    dsu = DSU()
+    dsu.add(pa.array([0], type=pa.uint32()))
+    with pytest.raises(ValueError):
+        dsu.add(pa.array([1], type=pa.int64()))
+
+
 def test_components_first_seen_order() -> None:
     """components() returns keys in the order they were first encountered."""
     dsu = DSU()

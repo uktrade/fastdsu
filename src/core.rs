@@ -191,6 +191,22 @@ impl Dsu {
         self.core.union_edges(&src_ids, &dst_ids)
     }
 
+    /// Add all keys from `keys` as singleton nodes when they are unseen.
+    ///
+    /// The array must be non-nullable. Its `DataType` must match the key type
+    /// already established for this `Dsu`, if any.
+    pub fn add(&mut self, keys: &ArrayRef) -> Result<(), CoreError> {
+        if keys.null_count() != 0 {
+            return Err(CoreError::NullsNotAllowed {
+                count: keys.null_count(),
+            });
+        }
+
+        self.interner.intern_array(keys)?;
+        self.core.grow(self.interner.len());
+        Ok(())
+    }
+
     /// Return every interned key alongside its component label.
     ///
     /// Keys are returned in first-seen order. The label is the original key
@@ -331,6 +347,32 @@ mod tests {
         assert_eq!(label_of(1), label_of(2));
         assert_eq!(label_of(2), label_of(3));
         assert_ne!(label_of(1), label_of(100));
+    }
+
+    #[test]
+    /// add creates singleton nodes and ignores keys already interned.
+    fn dsu_adds_singleton_keys() {
+        let mut dsu = Dsu::new();
+        dsu.add(&u32_array(vec![9, 3, 9])).unwrap();
+        dsu.add(&u32_array(vec![3, 9])).unwrap();
+
+        let (keys, labels) = dsu.components();
+        let keys = u32_values(&keys);
+        let labels = u32_values(&labels);
+
+        assert_eq!(keys, vec![9, 3]);
+        assert_ne!(labels[0], labels[1]);
+    }
+
+    #[test]
+    /// add rejects arrays containing nulls.
+    fn dsu_add_rejects_nulls() {
+        let mut dsu = Dsu::new();
+        let keys: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
+
+        let result = dsu.add(&keys);
+
+        assert_eq!(result, Err(CoreError::NullsNotAllowed { count: 1 }));
     }
 
     #[test]

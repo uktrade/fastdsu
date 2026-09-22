@@ -70,6 +70,18 @@ impl DSU {
         Ok(())
     }
 
+    /// Add keys as singleton components.
+    ///
+    /// The array must be non-nullable and use a fixed-width integer type. Its
+    /// data type fixes the key type for this `DSU` if no keys have been seen,
+    /// and must otherwise match the established key type.
+    pub fn add(&mut self, keys: PyArray) -> PyResult<()> {
+        let (keys_array, _) = keys.into_inner();
+
+        self.inner.add(&keys_array)?;
+        Ok(())
+    }
+
     /// Return every key seen so far alongside its component label, as a
     /// two-column Arrow table (`key`, `label`).
     ///
