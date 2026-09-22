@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         
       - name: Setup uv and just toolchain
-        uses: ./.github/actions/setup-toolchain
+        uses: uktrade/actions-data-matching/setup-toolchain@07725fae329c336d38ba49f339c78b3248cf0bc3
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         
       - name: Setup uv and just toolchain
-        uses: ./.github/actions/setup-toolchain
+        uses: uktrade/actions-data-matching/setup-toolchain@07725fae329c336d38ba49f339c78b3248cf0bc3
         with:
           python-version: "3.11"
 
@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         
       - name: Setup uv and just toolchain
-        uses: ./.github/actions/setup-toolchain
+        uses: uktrade/actions-data-matching/setup-toolchain@07725fae329c336d38ba49f339c78b3248cf0bc3
         with:
           python-version: "3.11"
 
@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         
       - name: Setup uv and just toolchain
-        uses: ./.github/actions/setup-toolchain
+        uses: uktrade/actions-data-matching/setup-toolchain@07725fae329c336d38ba49f339c78b3248cf0bc3
         with:
           python-version: "3.11"
 

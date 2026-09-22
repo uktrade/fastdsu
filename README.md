@@ -37,7 +37,7 @@ dsu.union(batch_2_src, batch_2_dst)
 # Extract components: zero-copy out, a two-column (key, label) Arrow table
 components = dsu.components()
 pa.record_batch(components)  # consume with PyArrow
-pl.from_arrow(components)    # or Polars, or any Arrow-compatible library
+pl.from_arrow(components)  # or Polars, or any Arrow-compatible library
 ```
 
 Works naturally with Polars:
