@@ -17,7 +17,7 @@
 ## ✅ Checklist:
 
 - [ ] This is the smallest, simplest solution to the problem
-- [ ] I've read [our code standards](../CONTRIBUTING.md) and this code follows them  
+- [ ] I've read [our code standards](https://uktrade.github.io/matchlab/contributing/) and this code follows them  
 - [ ] All new code is tested
 - [ ] I've updated all relevant documentation
 - [ ] I've reviewed the PR and ensured no secret values are present
