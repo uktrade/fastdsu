@@ -34,6 +34,9 @@ dsu = DSU()
 dsu.union(batch_1_src, batch_1_dst)
 dsu.union(batch_2_src, batch_2_dst)
 
+# Include keys with no edges as singleton components
+dsu.add(batch_3_src)
+
 # Extract components: zero-copy out, a two-column (key, label) Arrow table
 components = dsu.components()
 pa.record_batch(components)  # consume with PyArrow
