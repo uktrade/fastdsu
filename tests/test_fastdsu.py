@@ -107,13 +107,29 @@ def test_add_enforces_established_dtype() -> None:
         dsu.add(pa.array([1], type=pa.int64()))
 
 
+def test_component_label_is_smallest_signed_key() -> None:
+    """Canonical labels use the numeric ordering of signed keys."""
+    dsu = DSU()
+    dsu.union(
+        pa.array([100, -5], type=pa.int32()),
+        pa.array([-5, -50], type=pa.int32()),
+    )
+
+    components = pl.from_arrow(dsu.components())
+
+    assert components["key"].to_list() == [100, -5, -50]
+    assert components["label"].to_list() == [-50, -50, -50]
+
+
 def test_components_first_seen_order() -> None:
     """components() returns keys in the order they were first encountered."""
     dsu = DSU()
     dsu.union(*src_dst((9, 3)))
     dsu.union(*src_dst((3, 1)))
     components = pl.from_arrow(dsu.components())
+
     assert components["key"].to_list() == [9, 3, 1]
+    assert components["label"].to_list() == [1, 1, 1]
 
 
 def test_polars_arrays_accepted() -> None:

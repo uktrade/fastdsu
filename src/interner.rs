@@ -192,8 +192,37 @@ macro_rules! primitive_keys {
             fn decode_ids_to_array(&self, ids: &[u32]) -> ArrayRef {
                 match self {
                     $(Keys::$variant(keys) => {
-                        let values: Vec<$native> =
-                            ids.iter().map(|&id| keys.keys[id as usize]).collect();
+                        debug_assert_eq!(ids.len(), keys.keys.len());
+
+                        // Indexed by structural root; stores the dense id of the
+                        // smallest original key belonging to that component.
+                        let mut minimum_ids = vec![None; keys.keys.len()];
+
+                        for (key_id, &root_id) in ids.iter().enumerate() {
+                            let key_id = key_id as u32;
+                            let minimum_id = &mut minimum_ids[root_id as usize];
+
+                            match *minimum_id {
+                                Some(current_id)
+                                    if keys.keys[key_id as usize]
+                                        < keys.keys[current_id as usize] =>
+                                {
+                                    *minimum_id = Some(key_id);
+                                }
+                                None => *minimum_id = Some(key_id),
+                                Some(_) => {}
+                            }
+                        }
+
+                        let values: Vec<$native> = ids
+                            .iter()
+                            .map(|&root_id| {
+                                let minimum_id = minimum_ids[root_id as usize]
+                                    .expect("every component root must have at least one key");
+                                keys.keys[minimum_id as usize]
+                            })
+                            .collect();
+
                         Arc::new(<$array_ty>::from(values))
                     })+
                 }
@@ -311,6 +340,8 @@ impl Interner {
     }
 
     /// Resolve dense ids back to an Arrow array of the established key type.
+    ///
+    /// Each label is the smallest original key in its component.
     ///
     /// # Panics
     ///
