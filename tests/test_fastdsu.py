@@ -171,7 +171,7 @@ def test_preview_union_matches_union() -> None:
 
 
 def test_preview_union_noop_empty() -> None:
-    """A no-op touches its whole component; empty input touches none."""
+    """A no-op touches its whole component, while empty input touches none."""
     dsu = DSU()
     dsu.union(*src_dst((4, 5), (7, 8)))
     before = pl.from_arrow(dsu.components())
