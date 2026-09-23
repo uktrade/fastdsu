@@ -150,6 +150,127 @@ def test_components_consumable_by_pyarrow() -> None:
     assert batch.schema.field("label").type == pa.uint32()
 
 
+def test_preview_matches_union() -> None:
+    """Preview includes whole touched components and new keys in real-union order."""
+    dsu = DSU()
+    dsu.union(*src_dst((9, 3), (3, 1), (7, 8)))
+    before = pl.from_arrow(dsu.components())
+    src, dst = src_dst((3, 50), (50, 90), (90, 60))
+
+    preview = pl.from_arrow(dsu.preview_union(src, dst))
+    assert preview["key"].to_list() == [9, 3, 1, 50, 90, 60]
+    assert preview.equals(pl.from_arrow(dsu.preview_union(src, dst)))
+    assert before.equals(pl.from_arrow(dsu.components()))
+
+    dsu.union(src, dst)
+    actual = pl.from_arrow(dsu.components())
+    assert preview.equals(actual.filter(pl.col("key").is_in(preview["key"].to_list())))
+    assert actual.filter(pl.col("key").is_in([7, 8])).equals(
+        before.filter(pl.col("key").is_in([7, 8]))
+    )
+
+
+def test_preview_smallest_signed_key() -> None:
+    """An existing component's smallest signed key need not occur in the edges."""
+    dsu = DSU()
+    dsu.union(
+        pa.array([100, -5], type=pa.int32()),
+        pa.array([-5, -50], type=pa.int32()),
+    )
+    before = pa.record_batch(dsu.components())
+    src = pa.array([-5], type=pa.int32())
+    dst = pa.array([200], type=pa.int32())
+
+    preview = pa.record_batch(dsu.preview_union(src, dst))
+    assert preview.column("key").to_pylist() == [100, -5, -50, 200]
+    assert preview.column("label").to_pylist() == [-50] * 4
+    assert before.equals(pa.record_batch(dsu.components()))
+
+    dsu.union(src, dst)
+    assert preview.equals(pa.record_batch(dsu.components()))
+
+
+def test_preview_noop_and_empty() -> None:
+    """A no-op touches its whole component, while empty input touches none."""
+    dsu = DSU()
+    dsu.union(*src_dst((4, 5), (7, 8)))
+    before = pl.from_arrow(dsu.components())
+    assert pl.from_arrow(dsu.preview_union(*src_dst((5, 5)))).equals(
+        before.filter(pl.col("key").is_in([4, 5]))
+    )
+    empty = pa.array([], type=pa.uint32())
+    batch = pa.record_batch(dsu.preview_union(empty, empty))
+    assert batch.num_rows == 0
+    assert batch.schema.names == ["key", "label"]
+    assert batch.schema.field("key").type == pa.uint32()
+    assert before.equals(pl.from_arrow(dsu.components()))
+
+
+def test_preview_new_dtype() -> None:
+    """Hypothetical new keys do not set the DSU's permanent key type."""
+    dsu = DSU()
+    preview = pa.record_batch(
+        dsu.preview_union(
+            pa.array([11], type=pa.int8()),
+            pa.array([12], type=pa.int8()),
+        )
+    )
+    assert preview.schema.field("label").type == pa.int8()
+    assert preview.column("key").to_pylist() == [11, 12]
+    assert len(pl.from_arrow(dsu.components())) == 0
+    dsu.union(*src_dst((1, 2)))
+    assert pa.record_batch(dsu.components()).schema.field("key").type == pa.uint32()
+
+
+def test_preview_merges_components() -> None:
+    """Several component merges in one batch produce canonical labels."""
+    dsu = DSU()
+    dsu.union(*src_dst((10, 11), (20, 21), (30, 31), (40, 41), (90, 91)))
+    src, dst = src_dst((21, 31), (11, 41), (20, 10), (41, 5))
+    preview = pl.from_arrow(dsu.preview_union(src, dst))
+    assert preview["key"].to_list() == [10, 20, 30, 40, 11, 21, 31, 41, 5]
+    assert preview["label"].to_list() == [5] * 9
+    dsu.union(src, dst)
+    actual = pl.from_arrow(dsu.components())
+    assert preview.equals(actual.filter(pl.col("key").is_in(preview["key"].to_list())))
+
+
+@pytest.mark.parametrize("arrow_type", [pa.int8(), pa.uint64()])
+def test_preview_integer_types(arrow_type: pa.DataType) -> None:
+    """Preview supports the same fixed-width key types as union."""
+    dsu = DSU()
+    dsu.union(
+        pa.array([1], type=arrow_type),
+        pa.array([2], type=arrow_type),
+    )
+    preview = pa.record_batch(
+        dsu.preview_union(
+            pa.array([2], type=arrow_type),
+            pa.array([3], type=arrow_type),
+        )
+    )
+    assert preview.schema.field("key").type == arrow_type
+    assert preview.schema.field("label").type == arrow_type
+    assert preview.column("key").to_pylist() == [1, 2, 3]
+
+
+def test_preview_invalid_input() -> None:
+    """Rejected previews retain the original keys, labels and key type."""
+    dsu = DSU()
+    dsu.union(*src_dst((0, 1)))
+    before = pl.from_arrow(dsu.components())
+    u32 = pa.array([1], type=pa.uint32())
+    with pytest.raises(ValueError, match="length"):
+        dsu.preview_union(u32, pa.array([2, 3], type=pa.uint32()))
+    with pytest.raises(ValueError, match="null"):
+        dsu.preview_union(pa.array([None], type=pa.uint32()), u32)
+    with pytest.raises(ValueError):
+        dsu.preview_union(u32, pa.array([2], type=pa.int64()))
+    with pytest.raises(ValueError):
+        dsu.preview_union(pa.array(["x"]), pa.array(["y"]))
+    assert before.equals(pl.from_arrow(dsu.components()))
+
+
 def test_length_mismatch_raises() -> None:
     """A ValueError is raised when src and dst arrays have different lengths."""
     dsu = DSU()

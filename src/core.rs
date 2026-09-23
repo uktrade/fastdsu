@@ -1,5 +1,6 @@
 use arrow_array::ArrayRef;
 use arrow_schema::DataType;
+use hashbrown::HashMap;
 use std::fmt;
 
 use crate::interner::Interner;
@@ -122,6 +123,13 @@ impl DsuCore {
         self.parent[x] as usize
     }
 
+    fn root(&self, mut x: u32) -> u32 {
+        while self.parent[x as usize] != x {
+            x = self.parent[x as usize];
+        }
+        x
+    }
+
     fn union_roots(&mut self, a: usize, b: usize) {
         let ra = self.find_root(a);
         let rb = self.find_root(b);
@@ -189,6 +197,69 @@ impl Dsu {
         }
 
         self.core.union_edges(&src_ids, &dst_ids)
+    }
+
+    /// Return only components touched by these hypothetical edges, without
+    /// interning keys or changing parents and ranks.
+    pub fn preview_union(
+        &self,
+        src: &ArrayRef,
+        dst: &ArrayRef,
+    ) -> Result<(ArrayRef, ArrayRef), CoreError> {
+        for array in [src, dst] {
+            if array.null_count() != 0 {
+                return Err(CoreError::NullsNotAllowed {
+                    count: array.null_count(),
+                });
+            }
+        }
+        if src.len() != dst.len() {
+            return Err(CoreError::LengthMismatch {
+                src: src.len(),
+                dst: dst.len(),
+            });
+        }
+
+        let (src_ids, dst_ids, pending) = self.interner.preview_arrays(src, dst)?;
+        let existing_len = self.core.len();
+        let root = |id: u32| {
+            if (id as usize) < existing_len {
+                self.core.root(id)
+            } else {
+                id
+            }
+        };
+        let mut compact_ids = HashMap::<u32, u32>::new();
+        for id in src_ids.iter().chain(&dst_ids) {
+            let compact_id = compact_ids.len() as u32;
+            compact_ids.entry(root(*id)).or_insert(compact_id);
+        }
+
+        let mut preview = DsuCore::new();
+        preview.grow(compact_ids.len());
+        for (&s, &d) in src_ids.iter().zip(&dst_ids) {
+            let a = compact_ids[&root(s)] as usize;
+            let b = compact_ids[&root(d)] as usize;
+            preview.union_roots(a, b);
+        }
+
+        let mut key_ids = Vec::new();
+        let mut group_ids = Vec::new();
+        for id in 0..existing_len + pending.len() {
+            let id = id as u32;
+            if let Some(&compact_id) = compact_ids.get(&root(id)) {
+                key_ids.push(id);
+                group_ids.push(preview.root(compact_id));
+            }
+        }
+        let label_ids =
+            self.interner
+                .preview_minimum_ids(&pending, &key_ids, &group_ids, compact_ids.len());
+
+        Ok((
+            self.interner.decode_preview_ids(&pending, &key_ids),
+            self.interner.decode_preview_ids(&pending, &label_ids),
+        ))
     }
 
     /// Add all keys from `keys` as singleton nodes when they are unseen.
@@ -442,5 +513,42 @@ mod tests {
         let src: ArrayRef = Arc::new(UInt32Array::from(vec![Some(1), None]));
         let result = dsu.union_edges(&src, &u32_array(vec![1, 2]));
         assert_eq!(result, Err(CoreError::NullsNotAllowed { count: 1 }));
+    }
+
+    #[test]
+    fn preview_matches_union() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&u32_array(vec![9, 3, 7, 20]), &u32_array(vec![3, 1, 8, 21]))
+            .unwrap();
+        let parents = dsu.core.parent.clone();
+        let ranks = dsu.core.rank.clone();
+        let len = dsu.interner.len();
+        let src = u32_array(vec![3, 50, 90]);
+        let dst = u32_array(vec![50, 90, 60]);
+        let (keys, labels) = dsu.preview_union(&src, &dst).unwrap();
+        assert_eq!(u32_values(&keys), vec![9, 3, 1, 50, 90, 60]);
+        assert_eq!(dsu.core.parent, parents);
+        assert_eq!(dsu.core.rank, ranks);
+        assert_eq!(dsu.interner.len(), len);
+
+        dsu.union_edges(&src, &dst).unwrap();
+        let (actual_keys, actual_labels) = dsu.components();
+        let actual_keys = u32_values(&actual_keys);
+        let actual_labels = u32_values(&actual_labels);
+        for (&key, &label) in u32_values(&keys).iter().zip(u32_values(&labels).iter()) {
+            let index = actual_keys.iter().position(|&k| k == key).unwrap();
+            assert_eq!(label, actual_labels[index]);
+        }
+    }
+
+    #[test]
+    fn preview_empty() {
+        let dsu = Dsu::new();
+        let empty = u32_array(vec![]);
+        let (keys, labels) = dsu.preview_union(&empty, &empty).unwrap();
+        assert!(u32_values(&keys).is_empty());
+        assert!(u32_values(&labels).is_empty());
+        assert_eq!(dsu.interner.len(), 0);
+        assert_eq!(dsu.core.len(), 0);
     }
 }
