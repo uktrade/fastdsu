@@ -70,6 +70,24 @@ impl DSU {
         Ok(())
     }
 
+    /// Preview a union without changing this DSU.
+    ///
+    /// Accepts the same arrays as `union()`. Returns only components touched
+    /// by the edges, including their existing members and any new keys, in
+    /// the same `(key, label)` format and order as `components()` would after
+    /// the union. No new keys or edges are retained.
+    pub fn preview_union<'py>(
+        &self,
+        py: Python<'py>,
+        src: PyArray,
+        dst: PyArray,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (src_array, _) = src.into_inner();
+        let (dst_array, _) = dst.into_inner();
+        let (key_array, label_array) = self.inner.preview_union(&src_array, &dst_array)?;
+        components_to_pyobject(py, key_array, label_array)
+    }
+
     /// Add keys as singleton components.
     ///
     /// The array must be non-nullable and use a fixed-width integer type. Its

@@ -43,6 +43,13 @@ pa.record_batch(components)  # consume with PyArrow
 pl.from_arrow(components)  # or Polars, or any Arrow-compatible library
 ```
 
+Preview a batch before applying it, without modifying the DSU:
+
+```python
+preview = dsu.preview_union(batch_4_src, batch_4_dst)
+pa.record_batch(preview)
+```
+
 Works naturally with Polars:
 
 ```python
