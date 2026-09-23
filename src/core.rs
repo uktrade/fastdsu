@@ -230,23 +230,13 @@ impl Dsu {
             }
         };
         let mut compact_ids = HashMap::<u32, u32>::new();
-        let mut roots = Vec::<u32>::new();
         for id in src_ids.iter().chain(&dst_ids) {
-            let global_root = root(*id);
-            compact_ids.entry(global_root).or_insert_with(|| {
-                let compact_id = roots.len() as u32;
-                roots.push(global_root);
-                compact_id
-            });
+            let compact_id = compact_ids.len() as u32;
+            compact_ids.entry(root(*id)).or_insert(compact_id);
         }
 
         let mut preview = DsuCore::new();
-        preview.grow(roots.len());
-        for (id, &global_root) in roots.iter().enumerate() {
-            if (global_root as usize) < existing_len {
-                preview.rank[id] = self.core.rank[global_root as usize];
-            }
-        }
+        preview.grow(compact_ids.len());
         for (&s, &d) in src_ids.iter().zip(&dst_ids) {
             let a = compact_ids[&root(s)] as usize;
             let b = compact_ids[&root(d)] as usize;
@@ -254,14 +244,17 @@ impl Dsu {
         }
 
         let mut key_ids = Vec::new();
-        let mut label_ids = Vec::new();
+        let mut group_ids = Vec::new();
         for id in 0..existing_len + pending.len() {
             let id = id as u32;
             if let Some(&compact_id) = compact_ids.get(&root(id)) {
                 key_ids.push(id);
-                label_ids.push(roots[preview.root(compact_id) as usize]);
+                group_ids.push(preview.root(compact_id));
             }
         }
+        let label_ids =
+            self.interner
+                .preview_minimum_ids(&pending, &key_ids, &group_ids, compact_ids.len());
 
         Ok((
             self.interner.decode_preview_ids(&pending, &key_ids),
@@ -523,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn dsu_preview_matches_union() {
+    fn preview_matches_union() {
         let mut dsu = Dsu::new();
         dsu.union_edges(&u32_array(vec![9, 3, 7, 20]), &u32_array(vec![3, 1, 8, 21]))
             .unwrap();
@@ -549,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn dsu_preview_empty() {
+    fn preview_empty() {
         let dsu = Dsu::new();
         let empty = u32_array(vec![]);
         let (keys, labels) = dsu.preview_union(&empty, &empty).unwrap();

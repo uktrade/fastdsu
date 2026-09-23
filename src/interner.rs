@@ -33,6 +33,28 @@ fn checked_next_id(len: usize) -> Result<u32, CoreError> {
     u32::try_from(len).map_err(|_| CoreError::TooManyKeys)
 }
 
+fn minimum_ids_by_group<T: Ord>(
+    key_ids: impl ExactSizeIterator<Item = u32>,
+    group_ids: &[u32],
+    group_count: usize,
+    value: impl Fn(u32) -> T,
+) -> Vec<u32> {
+    assert_eq!(key_ids.len(), group_ids.len());
+    let mut minimum_ids = vec![None; group_count];
+    for (key_id, &group_id) in key_ids.zip(group_ids) {
+        let minimum = &mut minimum_ids[group_id as usize];
+        if minimum.is_none_or(|current| value(key_id) < value(current)) {
+            *minimum = Some(key_id);
+        }
+    }
+    group_ids
+        .iter()
+        .map(|&group_id| {
+            minimum_ids[group_id as usize].expect("each group contains at least one key")
+        })
+        .collect()
+}
+
 impl<T: Copy + Eq + std::hash::Hash> PrimitiveKeys<T> {
     fn new() -> Self {
         Self {
@@ -189,38 +211,45 @@ macro_rules! primitive_keys {
                 }
             }
 
+            fn preview_minimum_ids(
+                &self,
+                existing: Option<&Keys>,
+                key_ids: &[u32],
+                group_ids: &[u32],
+                group_count: usize,
+                offset: usize,
+            ) -> Vec<u32> {
+                match self {
+                    $(Keys::$variant(keys) => {
+                        let old = match existing {
+                            Some(Keys::$variant(old)) => Some(old),
+                            None => None,
+                            _ => unreachable!("preview key types were validated"),
+                        };
+                        minimum_ids_by_group(key_ids.iter().copied(), group_ids, group_count, |id| {
+                            if (id as usize) < offset {
+                                old.expect("existing key").keys[id as usize]
+                            } else {
+                                keys.keys[id as usize - offset]
+                            }
+                        })
+                    })+
+                }
+            }
+
             fn decode_ids_to_array(&self, ids: &[u32]) -> ArrayRef {
                 match self {
                     $(Keys::$variant(keys) => {
                         debug_assert_eq!(ids.len(), keys.keys.len());
-
-                        // Indexed by structural root; stores the dense id of the
-                        // smallest original key belonging to that component.
-                        let mut minimum_ids = vec![None; keys.keys.len()];
-
-                        for (key_id, &root_id) in ids.iter().enumerate() {
-                            let key_id = key_id as u32;
-                            let minimum_id = &mut minimum_ids[root_id as usize];
-
-                            match *minimum_id {
-                                Some(current_id)
-                                    if keys.keys[key_id as usize]
-                                        < keys.keys[current_id as usize] =>
-                                {
-                                    *minimum_id = Some(key_id);
-                                }
-                                None => *minimum_id = Some(key_id),
-                                Some(_) => {}
-                            }
-                        }
-
-                        let values: Vec<$native> = ids
+                        let minimum_ids = minimum_ids_by_group(
+                            0..ids.len() as u32,
+                            ids,
+                            keys.keys.len(),
+                            |id| keys.keys[id as usize],
+                        );
+                        let values: Vec<$native> = minimum_ids
                             .iter()
-                            .map(|&root_id| {
-                                let minimum_id = minimum_ids[root_id as usize]
-                                    .expect("every component root must have at least one key");
-                                keys.keys[minimum_id as usize]
-                            })
+                            .map(|&id| keys.keys[id as usize])
                             .collect();
 
                         Arc::new(<$array_ty>::from(values))
@@ -337,6 +366,26 @@ impl Interner {
             .as_ref()
             .expect("validated preview type")
             .decode_preview_ids(self.keys.as_ref(), ids, self.len())
+    }
+
+    pub fn preview_minimum_ids(
+        &self,
+        pending: &Interner,
+        key_ids: &[u32],
+        group_ids: &[u32],
+        group_count: usize,
+    ) -> Vec<u32> {
+        pending
+            .keys
+            .as_ref()
+            .expect("validated preview type")
+            .preview_minimum_ids(
+                self.keys.as_ref(),
+                key_ids,
+                group_ids,
+                group_count,
+                self.len(),
+            )
     }
 
     /// Resolve dense ids back to an Arrow array of the established key type.
