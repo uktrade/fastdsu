@@ -151,16 +151,15 @@ def test_components_consumable_by_pyarrow() -> None:
 
 
 def test_preview_matches_union() -> None:
-    """Preview includes whole touched components and new keys in real-union order."""
+    """Preview includes touched components in first-seen key order."""
     dsu = DSU()
     dsu.union(*src_dst((9, 3), (3, 1), (7, 8)))
     before = pl.from_arrow(dsu.components())
     src, dst = src_dst((3, 50), (50, 90), (90, 60))
 
     preview = pl.from_arrow(dsu.preview_union(src, dst))
+    # 9 and 1 belong to 3's component; 7 and 8 belong to an untouched one.
     assert preview["key"].to_list() == [9, 3, 1, 50, 90, 60]
-    assert preview.equals(pl.from_arrow(dsu.preview_union(src, dst)))
-    assert before.equals(pl.from_arrow(dsu.components()))
 
     dsu.union(src, dst)
     actual = pl.from_arrow(dsu.components())
@@ -170,8 +169,22 @@ def test_preview_matches_union() -> None:
     )
 
 
+def test_preview_repeatable() -> None:
+    """Repeated previews agree and retain the original components."""
+    dsu = DSU()
+    dsu.union(*src_dst((9, 3), (3, 1)))
+    before = pa.record_batch(dsu.components())
+    src, dst = src_dst((3, 50), (50, 90))
+
+    first = pa.record_batch(dsu.preview_union(src, dst))
+    second = pa.record_batch(dsu.preview_union(src, dst))
+
+    assert first.equals(second)
+    assert before.equals(pa.record_batch(dsu.components()))
+
+
 def test_preview_smallest_signed_key() -> None:
-    """An existing component's smallest signed key need not occur in the edges."""
+    """The smallest existing key need not occur in the preview edges."""
     dsu = DSU()
     dsu.union(
         pa.array([100, -5], type=pa.int32()),
@@ -223,11 +236,12 @@ def test_preview_new_dtype() -> None:
 
 
 def test_preview_merges_components() -> None:
-    """Several component merges in one batch produce canonical labels."""
+    """Merged components get one label; untouched components stay out."""
     dsu = DSU()
     dsu.union(*src_dst((10, 11), (20, 21), (30, 31), (40, 41), (90, 91)))
     src, dst = src_dst((21, 31), (11, 41), (20, 10), (41, 5))
     preview = pl.from_arrow(dsu.preview_union(src, dst))
+    # 90 and 91 are connected to each other, but no preview edge touches them.
     assert preview["key"].to_list() == [10, 20, 30, 40, 11, 21, 31, 41, 5]
     assert preview["label"].to_list() == [5] * 9
     dsu.union(src, dst)
@@ -272,10 +286,13 @@ def test_preview_invalid_input() -> None:
 
 
 def test_length_mismatch_raises() -> None:
-    """A ValueError is raised when src and dst arrays have different lengths."""
+    """A rejected edge batch does not add keys to the DSU."""
     dsu = DSU()
     with pytest.raises(ValueError, match="length"):
         dsu.union(pa.array([0], type=pa.uint32()), pa.array([1, 2], type=pa.uint32()))
+    assert pa.record_batch(dsu.components()).num_rows == 0
+    dsu.union(*src_dst((3, 4)))
+    assert pa.record_batch(dsu.components()).column("key").to_pylist() == [3, 4]
 
 
 @pytest.mark.parametrize("arrow_type", [pa.int8(), pa.uint64()])
@@ -300,10 +317,13 @@ def test_cross_call_dtype_mismatch_raises() -> None:
 
 
 def test_src_dst_dtype_mismatch_raises() -> None:
-    """A ValueError is raised when src and dst have different dtypes in one call."""
+    """A mismatched pair does not fix the DSU's key type or add keys."""
     dsu = DSU()
     with pytest.raises(ValueError):
         dsu.union(pa.array([0, 1], type=pa.uint32()), pa.array([1, 2], type=pa.int64()))
+    assert pa.record_batch(dsu.components()).num_rows == 0
+    dsu.union(pa.array([3], type=pa.int64()), pa.array([4], type=pa.int64()))
+    assert pa.record_batch(dsu.components()).schema.field("key").type == pa.int64()
 
 
 def test_unsupported_dtype_raises() -> None:

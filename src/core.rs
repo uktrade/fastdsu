@@ -174,13 +174,8 @@ impl Dsu {
         }
     }
 
-    /// Union all edges from the `src` and `dst` key arrays.
-    ///
-    /// Both arrays must be non-nullable Arrow arrays of equal length and the
-    /// same `DataType`. Keys are interned as needed. The `DataType` of the
-    /// first array seen fixes the key type for this `Dsu`'s lifetime.
-    /// Previously unseen keys become new singleton nodes.
-    pub fn union_edges(&mut self, src: &ArrayRef, dst: &ArrayRef) -> Result<(), CoreError> {
+    /// Reject invalid edge batches before interning can change this DSU.
+    fn validate_edges(&self, src: &ArrayRef, dst: &ArrayRef) -> Result<(), CoreError> {
         for array in [src, dst] {
             if array.null_count() != 0 {
                 return Err(CoreError::NullsNotAllowed {
@@ -188,6 +183,23 @@ impl Dsu {
                 });
             }
         }
+        if src.len() != dst.len() {
+            return Err(CoreError::LengthMismatch {
+                src: src.len(),
+                dst: dst.len(),
+            });
+        }
+        self.interner.validate_pair(src, dst)
+    }
+
+    /// Union all edges from the `src` and `dst` key arrays.
+    ///
+    /// Both arrays must be non-nullable Arrow arrays of equal length and the
+    /// same `DataType`. Keys are interned as needed. The `DataType` of the
+    /// first array seen fixes the key type for this `Dsu`'s lifetime.
+    /// Previously unseen keys become new singleton nodes.
+    pub fn union_edges(&mut self, src: &ArrayRef, dst: &ArrayRef) -> Result<(), CoreError> {
+        self.validate_edges(src, dst)?;
 
         let src_ids = self.interner.intern_array(src)?;
         let dst_ids = self.interner.intern_array(dst)?;
@@ -206,22 +218,12 @@ impl Dsu {
         src: &ArrayRef,
         dst: &ArrayRef,
     ) -> Result<(ArrayRef, ArrayRef), CoreError> {
-        for array in [src, dst] {
-            if array.null_count() != 0 {
-                return Err(CoreError::NullsNotAllowed {
-                    count: array.null_count(),
-                });
-            }
-        }
-        if src.len() != dst.len() {
-            return Err(CoreError::LengthMismatch {
-                src: src.len(),
-                dst: dst.len(),
-            });
-        }
+        self.validate_edges(src, dst)?;
 
-        let (src_ids, dst_ids, pending) = self.interner.preview_arrays(src, dst)?;
+        let (src_ids, dst_ids, preview_keys) = self.interner.preview_arrays(src, dst)?;
         let existing_len = self.core.len();
+        // Existing keys already belong to a component, so use their current
+        // root. A new key has no parent yet and stands for itself.
         let root = |id: u32| {
             if (id as usize) < existing_len {
                 self.core.root(id)
@@ -229,6 +231,8 @@ impl Dsu {
                 id
             }
         };
+        // Only roots named by the proposed edges need nodes in the temporary
+        // DSU; the persistent parent and rank arrays are left untouched.
         let mut compact_ids = HashMap::<u32, u32>::new();
         for id in src_ids.iter().chain(&dst_ids) {
             let compact_id = compact_ids.len() as u32;
@@ -245,20 +249,20 @@ impl Dsu {
 
         let mut key_ids = Vec::new();
         let mut group_ids = Vec::new();
-        for id in 0..existing_len + pending.len() {
+        // Scan every key so existing members of touched components appear in
+        // first-seen order, even when they are absent from the preview edges.
+        for id in 0..existing_len + preview_keys.len() {
             let id = id as u32;
             if let Some(&compact_id) = compact_ids.get(&root(id)) {
                 key_ids.push(id);
                 group_ids.push(preview.root(compact_id));
             }
         }
-        let label_ids =
-            self.interner
-                .preview_minimum_ids(&pending, &key_ids, &group_ids, compact_ids.len());
+        let label_ids = preview_keys.label_key_ids(&key_ids, &group_ids, compact_ids.len());
 
         Ok((
-            self.interner.decode_preview_ids(&pending, &key_ids),
-            self.interner.decode_preview_ids(&pending, &label_ids),
+            preview_keys.decode_ids(&key_ids),
+            preview_keys.decode_ids(&label_ids),
         ))
     }
 
@@ -518,27 +522,42 @@ mod tests {
     #[test]
     fn preview_matches_union() {
         let mut dsu = Dsu::new();
-        dsu.union_edges(&u32_array(vec![9, 3, 7, 20]), &u32_array(vec![3, 1, 8, 21]))
+        dsu.union_edges(&u32_array(vec![9, 3]), &u32_array(vec![3, 1]))
+            .unwrap();
+        dsu.union_edges(&u32_array(vec![90]), &u32_array(vec![91]))
+            .unwrap();
+        let src = u32_array(vec![3, 50]);
+        let dst = u32_array(vec![50, 60]);
+        let (keys, labels) = dsu.preview_union(&src, &dst).unwrap();
+        // 9 and 1 belong to 3's component; 90 and 91 are untouched.
+        assert_eq!(u32_values(&keys), vec![9, 3, 1, 50, 60]);
+
+        dsu.union_edges(&src, &dst).unwrap();
+        let (actual_keys, actual_labels) = dsu.components();
+        let actual: HashMap<_, _> = u32_values(&actual_keys)
+            .into_iter()
+            .zip(u32_values(&actual_labels))
+            .collect();
+        for (&key, &label) in u32_values(&keys).iter().zip(u32_values(&labels).iter()) {
+            assert_eq!(label, actual[&key]);
+        }
+    }
+
+    #[test]
+    fn preview_preserves_state() {
+        let mut dsu = Dsu::new();
+        dsu.union_edges(&u32_array(vec![9, 3]), &u32_array(vec![3, 1]))
             .unwrap();
         let parents = dsu.core.parent.clone();
         let ranks = dsu.core.rank.clone();
         let len = dsu.interner.len();
-        let src = u32_array(vec![3, 50, 90]);
-        let dst = u32_array(vec![50, 90, 60]);
-        let (keys, labels) = dsu.preview_union(&src, &dst).unwrap();
-        assert_eq!(u32_values(&keys), vec![9, 3, 1, 50, 90, 60]);
+
+        dsu.preview_union(&u32_array(vec![3]), &u32_array(vec![50]))
+            .unwrap();
+
         assert_eq!(dsu.core.parent, parents);
         assert_eq!(dsu.core.rank, ranks);
         assert_eq!(dsu.interner.len(), len);
-
-        dsu.union_edges(&src, &dst).unwrap();
-        let (actual_keys, actual_labels) = dsu.components();
-        let actual_keys = u32_values(&actual_keys);
-        let actual_labels = u32_values(&actual_labels);
-        for (&key, &label) in u32_values(&keys).iter().zip(u32_values(&labels).iter()) {
-            let index = actual_keys.iter().position(|&k| k == key).unwrap();
-            assert_eq!(label, actual_labels[index]);
-        }
     }
 
     #[test]
