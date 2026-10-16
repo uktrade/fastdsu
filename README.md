@@ -1,4 +1,4 @@
-# ⚡️ fastdsu
+# ⚡️ fastdsu TEST_PR
 
 A fast disjoint sets implementation for Python, backed by Rust.
 
